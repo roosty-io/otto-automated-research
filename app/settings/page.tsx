@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase'
-import { Settings, Database, Shield, Zap } from 'lucide-react'
+import { Settings, Database, Shield, Zap, FlaskConical } from 'lucide-react'
 import { CronJobTriggers } from '@/components/CronJobTriggers'
+import { SeedDataButton } from '@/components/SeedDataButton'
 
 export const dynamic = 'force-dynamic'
 
@@ -156,6 +157,28 @@ export default async function SettingsPage() {
         </div>
         <div className="p-6">
           <CronJobTriggers />
+        </div>
+      </div>
+
+      {/* Developer Tools */}
+      <div className="bg-white rounded-lg shadow mb-8">
+        <div className="px-6 py-4 border-b border-gray-200">
+          <div className="flex items-center">
+            <FlaskConical className="h-5 w-5 text-gray-500 mr-2" />
+            <h2 className="text-lg font-semibold text-gray-900">Developer Tools</h2>
+          </div>
+          <p className="text-sm text-gray-500 mt-1">
+            Tools for testing and development
+          </p>
+        </div>
+        <div className="p-6">
+          <div className="mb-4">
+            <h3 className="text-sm font-medium text-gray-700 mb-2">Seed Sample Data</h3>
+            <p className="text-sm text-gray-500 mb-3">
+              Create sample patterns, SKUs, and stores to test the system.
+            </p>
+            <SeedDataButton />
+          </div>
         </div>
       </div>
 
