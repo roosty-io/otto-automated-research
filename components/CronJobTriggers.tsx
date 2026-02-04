@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { Loader2, RefreshCw, Package, Activity, CheckCircle, XCircle } from 'lucide-react'
+import { Loader2, RefreshCw, Package, Activity, CheckCircle, XCircle, Play } from 'lucide-react'
 
 type JobResult = {
   success: boolean
@@ -64,6 +64,14 @@ export function CronJobTriggers() {
       icon: Package,
       color: 'green',
       hasDryRun: true,
+    },
+    {
+      id: 'process-jobs',
+      name: 'Process Jobs',
+      description: 'Execute pending listing jobs and assign SKUs',
+      endpoint: '/api/cron/process-jobs',
+      icon: Play,
+      color: 'purple',
     },
   ]
 

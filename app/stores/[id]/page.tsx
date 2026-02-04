@@ -1,8 +1,9 @@
 import { supabase } from '@/lib/supabase'
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
-import { ArrowLeft, Edit, Play, Pause } from 'lucide-react'
+import { ArrowLeft, Edit, Play } from 'lucide-react'
 import { DeleteStoreButton } from '@/components/DeleteStoreButton'
+import { ExportButton } from '@/components/ExportButton'
 
 export const dynamic = 'force-dynamic'
 
