@@ -1,5 +1,6 @@
 import { supabase } from '@/lib/supabase'
-import { Settings, Database, Bell, Shield } from 'lucide-react'
+import { Settings, Database, Shield, Zap } from 'lucide-react'
+import { CronJobTriggers } from '@/components/CronJobTriggers'
 
 export const dynamic = 'force-dynamic'
 
@@ -139,6 +140,22 @@ export default async function SettingsPage() {
               ))}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      {/* Automated Tasks */}
+      <div className="bg-white rounded-lg shadow mb-8">
+        <div className="px-6 py-4 border-b border-gray-200">
+          <div className="flex items-center">
+            <Zap className="h-5 w-5 text-gray-500 mr-2" />
+            <h2 className="text-lg font-semibold text-gray-900">Automated Tasks</h2>
+          </div>
+          <p className="text-sm text-gray-500 mt-1">
+            Manually trigger scheduled tasks or run health checks
+          </p>
+        </div>
+        <div className="p-6">
+          <CronJobTriggers />
         </div>
       </div>
 
