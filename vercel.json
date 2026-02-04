@@ -1,4 +1,0 @@
-{
-  "buildCommand": "cd admin-dashboard && npm install && npm run build",
-  "outputDirectory": "admin-dashboard/out"
-}
