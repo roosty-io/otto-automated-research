@@ -1,22 +1,49 @@
 import { supabase } from '@/lib/supabase'
-import { Package, Search, Filter } from 'lucide-react'
+import Link from 'next/link'
+import { Package, Layers, Tag, Plus, TrendingUp, AlertCircle } from 'lucide-react'
 
 export const dynamic = 'force-dynamic'
 
-async function getProductStats() {
-  // Get store count for context
-  const { count: storeCount } = await supabase
-    .from('stores')
-    .select('*', { count: 'exact', head: true })
-    .eq('is_active', true)
+async function getPatterns() {
+  const { data } = await supabase
+    .from('patterns')
+    .select('*')
+    .order('pattern_score', { ascending: false })
+    .limit(20)
+  return data || []
+}
+
+async function getSkus() {
+  const { data } = await supabase
+    .from('skus')
+    .select('*, patterns(category, price_band)')
+    .order('created_at', { ascending: false })
+    .limit(20)
+  return data || []
+}
+
+async function getStats() {
+  const [patternsCount, skusCount, activeAssignments, availableSkus] = await Promise.all([
+    supabase.from('patterns').select('*', { count: 'exact', head: true }),
+    supabase.from('skus').select('*', { count: 'exact', head: true }),
+    supabase.from('store_sku_assignments').select('*', { count: 'exact', head: true }).eq('listing_status', 'active'),
+    supabase.from('skus').select('*', { count: 'exact', head: true }).eq('status', 'ready').lt('current_store_count', 3),
+  ])
 
   return {
-    storeCount: storeCount || 0,
+    patterns: patternsCount.count || 0,
+    skus: skusCount.count || 0,
+    activeListings: activeAssignments.count || 0,
+    availableSkus: availableSkus.count || 0,
   }
 }
 
 export default async function ProductsPage() {
-  const stats = await getProductStats()
+  const [patterns, skus, stats] = await Promise.all([
+    getPatterns(),
+    getSkus(),
+    getStats(),
+  ])
 
   return (
     <div className="p-8">
@@ -24,99 +51,197 @@ export default async function ProductsPage() {
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Products & Patterns</h1>
           <p className="text-gray-500 mt-1">
-            Manage product patterns across {stats.storeCount} active stores
+            Products are disposable, patterns are permanent
           </p>
+        </div>
+        <div className="flex gap-3">
+          <Link
+            href="/products/patterns/new"
+            className="inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md shadow-sm hover:bg-gray-50"
+          >
+            <Layers className="h-4 w-4 mr-2" />
+            New Pattern
+          </Link>
+          <Link
+            href="/products/skus/new"
+            className="inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md shadow-sm hover:bg-blue-700"
+          >
+            <Plus className="h-4 w-4 mr-2" />
+            New SKU
+          </Link>
         </div>
       </div>
 
-      {/* Coming Soon Banner */}
-      <div className="bg-gradient-to-r from-blue-500 to-purple-600 rounded-lg shadow-lg p-8 mb-8 text-white">
-        <div className="flex items-center mb-4">
-          <Package className="h-10 w-10 mr-4" />
+      {/* Stats Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        <div className="bg-white rounded-lg shadow p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-500">Total Patterns</p>
+              <p className="text-3xl font-bold text-gray-900">{stats.patterns}</p>
+            </div>
+            <Layers className="h-10 w-10 text-purple-500" />
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg shadow p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-500">Total SKUs</p>
+              <p className="text-3xl font-bold text-gray-900">{stats.skus}</p>
+            </div>
+            <Tag className="h-10 w-10 text-blue-500" />
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg shadow p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-500">Active Listings</p>
+              <p className="text-3xl font-bold text-gray-900">{stats.activeListings}</p>
+            </div>
+            <TrendingUp className="h-10 w-10 text-green-500" />
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg shadow p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-500">Available SKUs</p>
+              <p className="text-3xl font-bold text-gray-900">{stats.availableSkus}</p>
+            </div>
+            <Package className="h-10 w-10 text-orange-500" />
+          </div>
+          <p className="text-xs text-gray-400 mt-2">Ready & under 3 stores</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* Patterns Section */}
+        <div className="bg-white rounded-lg shadow">
+          <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+            <div className="flex items-center">
+              <Layers className="h-5 w-5 text-gray-500 mr-2" />
+              <h2 className="text-lg font-semibold text-gray-900">Patterns</h2>
+            </div>
+            <Link href="/products/patterns" className="text-sm text-blue-600 hover:underline">
+              View All
+            </Link>
+          </div>
+          <div className="divide-y divide-gray-200">
+            {patterns.length === 0 ? (
+              <div className="p-6 text-center text-gray-500">
+                <Layers className="h-12 w-12 mx-auto mb-2 opacity-50" />
+                <p>No patterns yet</p>
+                <Link href="/products/patterns/new" className="text-blue-600 hover:underline text-sm">
+                  Create your first pattern
+                </Link>
+              </div>
+            ) : (
+              patterns.slice(0, 5).map((pattern: any) => (
+                <Link
+                  key={pattern.id}
+                  href={`/products/patterns/${pattern.id}`}
+                  className="block px-6 py-4 hover:bg-gray-50"
+                >
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <p className="font-medium text-gray-900">
+                        {pattern.category}
+                        {pattern.subcategory && ` / ${pattern.subcategory}`}
+                      </p>
+                      <p className="text-sm text-gray-500">
+                        {pattern.use_case || 'General'} • {pattern.price_band}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-medium text-gray-900">
+                        {pattern.total_skus} SKUs
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        Score: {pattern.pattern_score.toFixed(1)}
+                      </p>
+                    </div>
+                  </div>
+                </Link>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* SKUs Section */}
+        <div className="bg-white rounded-lg shadow">
+          <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+            <div className="flex items-center">
+              <Tag className="h-5 w-5 text-gray-500 mr-2" />
+              <h2 className="text-lg font-semibold text-gray-900">Recent SKUs</h2>
+            </div>
+            <Link href="/products/skus" className="text-sm text-blue-600 hover:underline">
+              View All
+            </Link>
+          </div>
+          <div className="divide-y divide-gray-200">
+            {skus.length === 0 ? (
+              <div className="p-6 text-center text-gray-500">
+                <Tag className="h-12 w-12 mx-auto mb-2 opacity-50" />
+                <p>No SKUs yet</p>
+                <Link href="/products/skus/new" className="text-blue-600 hover:underline text-sm">
+                  Create your first SKU
+                </Link>
+              </div>
+            ) : (
+              skus.slice(0, 5).map((sku: any) => (
+                <Link
+                  key={sku.id}
+                  href={`/products/skus/${sku.id}`}
+                  className="block px-6 py-4 hover:bg-gray-50"
+                >
+                  <div className="flex justify-between items-start">
+                    <div className="flex-1 min-w-0 mr-4">
+                      <p className="font-medium text-gray-900 truncate">{sku.title}</p>
+                      <p className="text-sm text-gray-500">{sku.sku_code}</p>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <p className="text-sm font-medium text-gray-900">
+                        ${sku.sell_price?.toFixed(2)}
+                      </p>
+                      <div className="flex items-center gap-1 justify-end">
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                            sku.status === 'ready'
+                              ? 'bg-green-100 text-green-800'
+                              : sku.status === 'distributed'
+                              ? 'bg-blue-100 text-blue-800'
+                              : 'bg-gray-100 text-gray-800'
+                          }`}
+                        >
+                          {sku.status}
+                        </span>
+                        <span className="text-xs text-gray-500">
+                          {sku.current_store_count}/3
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </Link>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Distribution Rules Info */}
+      <div className="mt-8 bg-blue-50 border border-blue-200 rounded-lg p-6">
+        <div className="flex items-start">
+          <AlertCircle className="h-5 w-5 text-blue-500 mt-0.5 mr-3 flex-shrink-0" />
           <div>
-            <h2 className="text-2xl font-bold">Product Pattern System</h2>
-            <p className="opacity-90">Coming Soon</p>
-          </div>
-        </div>
-        <p className="text-lg opacity-90 mb-4">
-          The core principle of PPME: &quot;Products are disposable, patterns are permanent.&quot;
-        </p>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
-          <div className="bg-white/20 rounded-lg p-4">
-            <h3 className="font-semibold mb-2">Pattern Management</h3>
-            <p className="text-sm opacity-90">
-              Create and manage product patterns that can be deployed across multiple stores
-            </p>
-          </div>
-          <div className="bg-white/20 rounded-lg p-4">
-            <h3 className="font-semibold mb-2">SKU Distribution</h3>
-            <p className="text-sm opacity-90">
-              Automatically distribute SKUs across stores with max 3 stores per SKU
-            </p>
-          </div>
-          <div className="bg-white/20 rounded-lg p-4">
-            <h3 className="font-semibold mb-2">Performance Tracking</h3>
-            <p className="text-sm opacity-90">
-              Track pattern performance and automatically prune underperforming listings
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {/* Placeholder Features */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white rounded-lg shadow p-6">
-          <div className="flex items-center mb-4">
-            <Search className="h-5 w-5 text-gray-500 mr-2" />
-            <h2 className="text-lg font-semibold text-gray-900">Pattern Search</h2>
-          </div>
-          <p className="text-gray-500 mb-4">
-            Search and filter product patterns by category, performance, or store assignment.
-          </p>
-          <div className="bg-gray-100 rounded-lg p-4 text-center text-gray-500">
-            <Package className="h-12 w-12 mx-auto mb-2 opacity-50" />
-            <p>Pattern search coming soon</p>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-lg shadow p-6">
-          <div className="flex items-center mb-4">
-            <Filter className="h-5 w-5 text-gray-500 mr-2" />
-            <h2 className="text-lg font-semibold text-gray-900">Store Assignments</h2>
-          </div>
-          <p className="text-gray-500 mb-4">
-            View and manage which patterns are assigned to which stores.
-          </p>
-          <div className="bg-gray-100 rounded-lg p-4 text-center text-gray-500">
-            <Package className="h-12 w-12 mx-auto mb-2 opacity-50" />
-            <p>Assignment view coming soon</p>
-          </div>
-        </div>
-      </div>
-
-      {/* System Info */}
-      <div className="bg-white rounded-lg shadow p-6 mt-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Pattern System Rules</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-gray-50 rounded-lg p-4">
-            <p className="text-sm font-medium text-gray-500">Max Stores per SKU</p>
-            <p className="text-2xl font-bold text-gray-900">3</p>
-            <p className="text-xs text-gray-400">Enforced by database trigger</p>
-          </div>
-          <div className="bg-gray-50 rounded-lg p-4">
-            <p className="text-sm font-medium text-gray-500">Prune Threshold</p>
-            <p className="text-2xl font-bold text-gray-900">14 days</p>
-            <p className="text-xs text-gray-400">Without a sale</p>
-          </div>
-          <div className="bg-gray-50 rounded-lg p-4">
-            <p className="text-sm font-medium text-gray-500">Active Stores</p>
-            <p className="text-2xl font-bold text-gray-900">{stats.storeCount}</p>
-            <p className="text-xs text-gray-400">Ready for patterns</p>
-          </div>
-          <div className="bg-gray-50 rounded-lg p-4">
-            <p className="text-sm font-medium text-gray-500">Pattern Database</p>
-            <p className="text-2xl font-bold text-gray-900">Ready</p>
-            <p className="text-xs text-gray-400">Tables configured</p>
+            <h3 className="font-medium text-blue-900">SKU Distribution Rules</h3>
+            <ul className="mt-2 text-sm text-blue-700 space-y-1">
+              <li>• Each SKU can be assigned to a maximum of 3 stores</li>
+              <li>• SKUs must be in "ready" status before assignment</li>
+              <li>• Assignments are tracked and enforced by database triggers</li>
+              <li>• Stale listings (no sale in 14 days) are candidates for pruning</li>
+            </ul>
           </div>
         </div>
       </div>

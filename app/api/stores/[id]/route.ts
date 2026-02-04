@@ -34,7 +34,7 @@ export async function PUT(
   try {
     const body = await request.json()
 
-    const { store_name, ebay_username, tier_id, ebay_registration_date, notes, is_active } = body
+    const { store_name, ebay_username, tier_id, ebay_registration_date, onboarding_date, notes, is_active } = body
 
     // Validate required fields
     if (!store_name || !ebay_username || !tier_id) {
@@ -67,6 +67,7 @@ export async function PUT(
         ebay_username,
         tier_id,
         ebay_registration_date: ebay_registration_date || null,
+        onboarding_date: onboarding_date || null,
         notes: notes || null,
         is_active: is_active ?? true,
       })

@@ -127,6 +127,106 @@ export type ListingJobDashboard = ListingJob & {
   duration_seconds: number | null
 }
 
+// Patterns (Layer 2)
+export type Pattern = {
+  id: string
+  category: string
+  subcategory: string | null
+  use_case: string | null
+  price_band: string
+  total_skus: number
+  total_sales: number
+  total_revenue: number
+  total_profit: number
+  avg_days_to_sale: number | null
+  return_rate: number
+  pattern_score: number
+  is_validated: boolean
+  validation_date: string | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+// SKUs (Layer 3)
+export type SkuStatus = 'draft' | 'ready' | 'distributed' | 'exhausted'
+
+export type Sku = {
+  id: string
+  normalized_product_id: string
+  pattern_id: string | null
+  sku_code: string
+  title: string
+  description: string | null
+  bullet_points: string[]
+  cost_price: number
+  sell_price: number
+  expected_profit: number
+  status: SkuStatus
+  max_store_count: number
+  current_store_count: number
+  total_sales: number
+  total_revenue: number
+  total_profit: number
+  avg_days_to_sale: number | null
+  created_at: string
+  updated_at: string
+}
+
+export type SkuWithPattern = Sku & {
+  patterns: Pattern | null
+}
+
+// Store SKU Assignments (Layer 4)
+export type ListingStatus = 'draft' | 'active' | 'paused' | 'ended' | 'pruned'
+
+export type StoreSkuAssignment = {
+  id: string
+  store_id: string
+  sku_id: string
+  ebay_listing_id: string | null
+  listing_url: string | null
+  listing_status: ListingStatus
+  listed_at: string | null
+  ended_at: string | null
+  impressions: number
+  clicks: number
+  sales_count: number
+  revenue: number
+  profit: number
+  last_sale_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type AssignmentWithDetails = StoreSkuAssignment & {
+  stores: { store_name: string; ebay_username: string }
+  skus: { sku_code: string; title: string; sell_price: number }
+}
+
+// Sales
+export type Sale = {
+  id: string
+  assignment_id: string
+  store_id: string
+  sku_id: string
+  ebay_order_id: string
+  ebay_order_date: string
+  sale_price: number
+  ebay_fees: number
+  shipping_cost: number
+  product_cost: number
+  profit: number
+  buyer_username: string | null
+  shipping_address_state: string | null
+  shipping_address_country: string
+  is_returned: boolean
+  returned_at: string | null
+  return_reason: string | null
+  created_at: string
+  updated_at: string
+}
+
 export type Database = {
   public: {
     Tables: {

@@ -20,6 +20,7 @@ export function EditStoreForm({ store, tiers }: Props) {
     ebay_username: store.ebay_username,
     tier_id: store.tier_id,
     ebay_registration_date: store.ebay_registration_date || '',
+    onboarding_date: store.onboarding_date || '',
     notes: store.notes || '',
     is_active: store.is_active,
   })
@@ -38,6 +39,7 @@ export function EditStoreForm({ store, tiers }: Props) {
         body: JSON.stringify({
           ...formData,
           ebay_registration_date: formData.ebay_registration_date || null,
+          onboarding_date: formData.onboarding_date || null,
           notes: formData.notes || null,
         }),
       })
@@ -150,18 +152,38 @@ export function EditStoreForm({ store, tiers }: Props) {
         )}
       </div>
 
-      {/* eBay Registration Date */}
-      <div>
-        <label htmlFor="ebay_registration_date" className="block text-sm font-medium text-gray-700 mb-1">
-          eBay Registration Date
-        </label>
-        <input
-          type="date"
-          id="ebay_registration_date"
-          value={formData.ebay_registration_date}
-          onChange={(e) => setFormData({ ...formData, ebay_registration_date: e.target.value })}
-          className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"
-        />
+      {/* Dates */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Onboarding Date */}
+        <div>
+          <label htmlFor="onboarding_date" className="block text-sm font-medium text-gray-700 mb-1">
+            Onboarding Date *
+          </label>
+          <input
+            type="date"
+            id="onboarding_date"
+            required
+            value={formData.onboarding_date}
+            onChange={(e) => setFormData({ ...formData, onboarding_date: e.target.value })}
+            className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"
+          />
+          <p className="mt-1 text-sm text-gray-500">Date store was onboarded to PPME</p>
+        </div>
+
+        {/* eBay Registration Date */}
+        <div>
+          <label htmlFor="ebay_registration_date" className="block text-sm font-medium text-gray-700 mb-1">
+            eBay Registration Date
+          </label>
+          <input
+            type="date"
+            id="ebay_registration_date"
+            value={formData.ebay_registration_date}
+            onChange={(e) => setFormData({ ...formData, ebay_registration_date: e.target.value })}
+            className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"
+          />
+          <p className="mt-1 text-sm text-gray-500">When the eBay account was created</p>
+        </div>
       </div>
 
       {/* Notes */}
