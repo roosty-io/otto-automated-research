@@ -319,15 +319,6 @@ CREATE TABLE store_sku_assignments (
 
     -- Last activity
     last_sale_at TIMESTAMPTZ,
-    days_without_sale INTEGER GENERATED ALWAYS AS (
-        CASE
-            WHEN last_sale_at IS NULL AND listed_at IS NOT NULL
-                THEN EXTRACT(DAY FROM NOW() - listed_at)::INTEGER
-            WHEN last_sale_at IS NOT NULL
-                THEN EXTRACT(DAY FROM NOW() - last_sale_at)::INTEGER
-            ELSE NULL
-        END
-    ) STORED,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -338,8 +329,8 @@ CREATE TABLE store_sku_assignments (
 CREATE INDEX idx_assignments_store ON store_sku_assignments(store_id);
 CREATE INDEX idx_assignments_sku ON store_sku_assignments(sku_id);
 CREATE INDEX idx_assignments_status ON store_sku_assignments(listing_status);
-CREATE INDEX idx_assignments_prune_candidates ON store_sku_assignments(days_without_sale)
-    WHERE listing_status = 'active' AND days_without_sale >= 14;
+CREATE INDEX idx_assignments_prune_candidates ON store_sku_assignments(last_sale_at, listed_at)
+    WHERE listing_status = 'active';
 
 -- =============================================================================
 -- DISTRIBUTION QUEUE
