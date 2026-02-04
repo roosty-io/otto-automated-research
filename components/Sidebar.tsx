@@ -10,6 +10,7 @@ import {
   Settings,
   BarChart3,
   Activity,
+  DollarSign,
 } from 'lucide-react'
 
 const navigation = [
@@ -18,6 +19,7 @@ const navigation = [
   { name: 'Jobs', href: '/jobs', icon: ListChecks },
   { name: 'Health', href: '/health', icon: Activity },
   { name: 'Products', href: '/products', icon: Package },
+  { name: 'Sales', href: '/sales', icon: DollarSign },
   { name: 'Analytics', href: '/analytics', icon: BarChart3 },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]
