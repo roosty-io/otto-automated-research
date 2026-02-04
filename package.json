@@ -1,5 +1,5 @@
 {
-  "name": "zik-bot",
+  "name": "ppme",
   "version": "1.0.0",
   "type": "module",
   "main": "server.js",
@@ -8,7 +8,8 @@
   },
   "scripts": {
     "start": "node server.js",
-    "postinstall": "npx playwright install chromium"
+    "build": "cd admin-dashboard && npm install && npm run build",
+    "dev": "cd admin-dashboard && npm run dev"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
