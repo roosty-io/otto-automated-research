@@ -20,9 +20,15 @@ export function SeedDataButton() {
       const data = await res.json()
 
       if (res.ok) {
+        const parts = [
+          `${data.results?.patterns?.created || 0} patterns`,
+          `${data.results?.skus?.created || 0} SKUs`,
+          data.results?.stores?.created ? `${data.results.stores.created} stores` : (data.results?.stores?.skipped || data.results?.stores?.error || 'stores skipped'),
+        ]
+        const errors = data.results?.skus?.errors
         setResult({
-          success: true,
-          message: `Created: ${data.results?.patterns?.created || 0} patterns, ${data.results?.skus?.created || 0} SKUs, ${data.results?.stores?.created || data.results?.stores?.skipped || 0} stores`,
+          success: data.results?.skus?.created > 0 || data.results?.patterns?.created > 0,
+          message: `Created: ${parts.join(', ')}${errors ? ` | Errors: ${errors.join('; ')}` : ''}`,
         })
       } else {
         setResult({

@@ -6,7 +6,7 @@ export async function POST() {
   try {
     const results: Record<string, any> = {}
 
-    // 1. Create sample patterns
+    // 1. Create sample patterns - use insert and handle duplicates gracefully
     const patternsToCreate = [
       { category: 'Electronics', subcategory: 'Phone Accessories', target_margin: 35, notes: 'High demand, quick turnover' },
       { category: 'Electronics', subcategory: 'Computer Accessories', target_margin: 30, notes: 'Good for tech stores' },
@@ -15,21 +15,26 @@ export async function POST() {
       { category: 'Sports & Outdoors', subcategory: 'Fitness', target_margin: 30, notes: 'Seasonal peaks in Jan' },
     ]
 
-    const { data: patterns, error: patternError } = await supabase
-      .from('patterns')
-      .upsert(patternsToCreate, { onConflict: 'category,subcategory', ignoreDuplicates: true })
-      .select()
+    // Insert patterns one by one to handle duplicates gracefully
+    let patternsCreated = 0
+    for (const pattern of patternsToCreate) {
+      const { error } = await supabase
+        .from('patterns')
+        .insert(pattern)
 
-    if (patternError) {
-      results.patterns = { error: patternError.message }
-    } else {
-      results.patterns = { created: patterns?.length || 0 }
+      if (!error) {
+        patternsCreated++
+      }
+      // Ignore duplicate errors
     }
+    results.patterns = { created: patternsCreated }
 
     // Get all patterns for SKU assignment
     const { data: allPatterns } = await supabase
       .from('patterns')
       .select('id, category, subcategory')
+
+    results.patternsFound = allPatterns?.length || 0
 
     // 2. Create sample SKUs
     const skusToCreate = [
@@ -41,7 +46,7 @@ export async function POST() {
         sell_price: 24.99,
         source_asin: 'B0EXAMPLE01',
         status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Phone Accessories')?.id,
+        pattern_id: allPatterns?.find(p => p.subcategory === 'Phone Accessories')?.id || null,
       },
       {
         title: 'USB-C to USB-A Adapter 4-Pack',
@@ -51,7 +56,7 @@ export async function POST() {
         sell_price: 15.99,
         source_asin: 'B0EXAMPLE02',
         status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Computer Accessories')?.id,
+        pattern_id: allPatterns?.find(p => p.subcategory === 'Computer Accessories')?.id || null,
       },
       {
         title: 'Silicone Kitchen Utensil Set 10-Piece',
@@ -61,7 +66,7 @@ export async function POST() {
         sell_price: 34.99,
         source_asin: 'B0EXAMPLE03',
         status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Kitchen Tools')?.id,
+        pattern_id: allPatterns?.find(p => p.subcategory === 'Kitchen Tools')?.id || null,
       },
       {
         title: 'Drawer Organizer Set 8-Pack',
@@ -71,7 +76,7 @@ export async function POST() {
         sell_price: 28.99,
         source_asin: 'B0EXAMPLE04',
         status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Organization')?.id,
+        pattern_id: allPatterns?.find(p => p.subcategory === 'Organization')?.id || null,
       },
       {
         title: 'Resistance Bands Set with Handles',
@@ -81,7 +86,7 @@ export async function POST() {
         sell_price: 32.99,
         source_asin: 'B0EXAMPLE05',
         status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Fitness')?.id,
+        pattern_id: allPatterns?.find(p => p.subcategory === 'Fitness')?.id || null,
       },
       {
         title: 'Wireless Charging Pad Fast Charger',
@@ -91,7 +96,7 @@ export async function POST() {
         sell_price: 22.99,
         source_asin: 'B0EXAMPLE06',
         status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Phone Accessories')?.id,
+        pattern_id: allPatterns?.find(p => p.subcategory === 'Phone Accessories')?.id || null,
       },
       {
         title: 'Laptop Stand Adjustable Aluminum',
@@ -101,7 +106,7 @@ export async function POST() {
         sell_price: 39.99,
         source_asin: 'B0EXAMPLE07',
         status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Computer Accessories')?.id,
+        pattern_id: allPatterns?.find(p => p.subcategory === 'Computer Accessories')?.id || null,
       },
       {
         title: 'Vegetable Chopper Dicer 12-in-1',
@@ -111,19 +116,30 @@ export async function POST() {
         sell_price: 44.99,
         source_asin: 'B0EXAMPLE08',
         status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Kitchen Tools')?.id,
+        pattern_id: allPatterns?.find(p => p.subcategory === 'Kitchen Tools')?.id || null,
       },
     ]
 
-    const { data: skus, error: skuError } = await supabase
-      .from('skus')
-      .insert(skusToCreate)
-      .select()
+    // Insert SKUs one by one to get better error handling
+    let skusCreated = 0
+    const skuErrors: string[] = []
 
-    if (skuError) {
-      results.skus = { error: skuError.message }
-    } else {
-      results.skus = { created: skus?.length || 0 }
+    for (const sku of skusToCreate) {
+      const { data, error } = await supabase
+        .from('skus')
+        .insert(sku)
+        .select()
+
+      if (error) {
+        skuErrors.push(`${sku.title.substring(0, 20)}: ${error.message}`)
+      } else if (data) {
+        skusCreated++
+      }
+    }
+
+    results.skus = {
+      created: skusCreated,
+      errors: skuErrors.length > 0 ? skuErrors : undefined
     }
 
     // 3. Create sample stores if none exist
@@ -141,45 +157,49 @@ export async function POST() {
       const bronzeTier = tiers?.find(t => t.tier_name === 'Bronze')?.id
       const silverTier = tiers?.find(t => t.tier_name === 'Silver')?.id
 
-      const storesToCreate = [
-        {
-          store_name: 'TechDeals247',
-          ebay_username: 'techdeals247',
-          tier_id: silverTier,
-          maturity_level: 'establishing',
-          current_active_listings: 150,
-          store_opened_at: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString(), // 90 days ago
-          notes: 'Electronics focused store',
-        },
-        {
-          store_name: 'HomeEssentials Plus',
-          ebay_username: 'homeessentials_plus',
-          tier_id: bronzeTier,
-          maturity_level: 'new',
-          current_active_listings: 45,
-          store_opened_at: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString(), // 20 days ago
-          notes: 'Home goods store',
-        },
-        {
-          store_name: 'FitGear Direct',
-          ebay_username: 'fitgeardirect',
-          tier_id: bronzeTier,
-          maturity_level: 'growing',
-          current_active_listings: 85,
-          store_opened_at: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString(), // 60 days ago
-          notes: 'Sports & fitness store',
-        },
-      ]
-
-      const { data: stores, error: storeError } = await supabase
-        .from('stores')
-        .insert(storesToCreate)
-        .select()
-
-      if (storeError) {
-        results.stores = { error: storeError.message }
+      if (!bronzeTier || !silverTier) {
+        results.stores = { error: 'Store tiers not found in database' }
       } else {
-        results.stores = { created: stores?.length || 0 }
+        const storesToCreate = [
+          {
+            store_name: 'TechDeals247',
+            ebay_username: 'techdeals247',
+            tier_id: silverTier,
+            maturity_level: 'establishing',
+            current_active_listings: 150,
+            store_opened_at: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString(),
+            notes: 'Electronics focused store',
+          },
+          {
+            store_name: 'HomeEssentials Plus',
+            ebay_username: 'homeessentials_plus',
+            tier_id: bronzeTier,
+            maturity_level: 'new',
+            current_active_listings: 45,
+            store_opened_at: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString(),
+            notes: 'Home goods store',
+          },
+          {
+            store_name: 'FitGear Direct',
+            ebay_username: 'fitgeardirect',
+            tier_id: bronzeTier,
+            maturity_level: 'growing',
+            current_active_listings: 85,
+            store_opened_at: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString(),
+            notes: 'Sports & fitness store',
+          },
+        ]
+
+        const { data: stores, error: storeError } = await supabase
+          .from('stores')
+          .insert(storesToCreate)
+          .select()
+
+        if (storeError) {
+          results.stores = { error: storeError.message }
+        } else {
+          results.stores = { created: stores?.length || 0 }
+        }
       }
     } else {
       results.stores = { skipped: 'Stores already exist' }
