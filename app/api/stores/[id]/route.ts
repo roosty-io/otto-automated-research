@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServerClient } from '@/lib/supabase'
+import { supabase } from '@/lib/supabase'
 
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const supabase = createServerClient()
 
     const { data, error } = await supabase
       .from('stores')
@@ -33,7 +32,6 @@ export async function PUT(
   { params }: { params: { id: string } }
 ) {
   try {
-    const supabase = createServerClient()
     const body = await request.json()
 
     const { store_name, ebay_username, tier_id, ebay_registration_date, notes, is_active } = body
@@ -93,8 +91,6 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
-    const supabase = createServerClient()
-
     // Check if store exists
     const { data: store } = await supabase
       .from('stores')
