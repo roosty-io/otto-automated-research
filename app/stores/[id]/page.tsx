@@ -235,6 +235,7 @@ export default async function StoreDetailPage({
           >
             View Listings
           </Link>
+          <ExportButton storeId={store.id} storeName={store.store_name} />
         </div>
       </div>
     </div>
