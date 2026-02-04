@@ -1,7 +1,8 @@
 import { supabase } from '@/lib/supabase'
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
-import { ArrowLeft, Edit, Trash2, Play, Pause } from 'lucide-react'
+import { ArrowLeft, Edit, Play, Pause } from 'lucide-react'
+import { DeleteStoreButton } from '@/components/DeleteStoreButton'
 
 export const dynamic = 'force-dynamic'
 
@@ -59,10 +60,7 @@ export default async function StoreDetailPage({
               <Edit className="h-4 w-4 mr-2" />
               Edit
             </Link>
-            <button className="inline-flex items-center px-4 py-2 text-sm font-medium text-red-700 bg-white border border-red-300 rounded-md shadow-sm hover:bg-red-50">
-              <Trash2 className="h-4 w-4 mr-2" />
-              Delete
-            </button>
+            <DeleteStoreButton storeId={store.id} storeName={store.store_name} />
           </div>
         </div>
       </div>
@@ -217,16 +215,25 @@ export default async function StoreDetailPage({
       <div className="bg-white rounded-lg shadow p-6 mt-6">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h2>
         <div className="flex flex-wrap gap-3">
-          <button className="inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700">
+          <Link
+            href={`/jobs/new?store=${store.id}`}
+            className="inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
+          >
             <Play className="h-4 w-4 mr-2" />
             Create Onboarding Job
-          </button>
-          <button className="inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">
+          </Link>
+          <Link
+            href="/jobs"
+            className="inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+          >
             View Jobs
-          </button>
-          <button className="inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">
+          </Link>
+          <Link
+            href="/products"
+            className="inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+          >
             View Listings
-          </button>
+          </Link>
         </div>
       </div>
     </div>

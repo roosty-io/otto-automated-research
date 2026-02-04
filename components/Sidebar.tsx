@@ -9,12 +9,14 @@ import {
   ListChecks,
   Settings,
   BarChart3,
+  Activity,
 } from 'lucide-react'
 
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Stores', href: '/stores', icon: Store },
   { name: 'Jobs', href: '/jobs', icon: ListChecks },
+  { name: 'Health', href: '/health', icon: Activity },
   { name: 'Products', href: '/products', icon: Package },
   { name: 'Analytics', href: '/analytics', icon: BarChart3 },
   { name: 'Settings', href: '/settings', icon: Settings },
