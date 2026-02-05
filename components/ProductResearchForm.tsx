@@ -10,10 +10,9 @@ interface ProductData {
   bullet_points: string[]
   cost_price: number
   sell_price: number
-  source_url: string
-  source_asin: string
-  image_url: string
   pattern_id: string
+  // For display only (not stored in DB)
+  asin_reference: string
 }
 
 interface Pattern {
@@ -35,10 +34,8 @@ export function ProductResearchForm() {
     bullet_points: ['', '', '', '', ''],
     cost_price: 0,
     sell_price: 0,
-    source_url: '',
-    source_asin: '',
-    image_url: '',
     pattern_id: '',
+    asin_reference: '',
   })
 
   // Extract ASIN from Amazon URL or direct input
@@ -85,12 +82,11 @@ export function ProductResearchForm() {
         setPatterns(patternsData)
       }
 
-      // For now, we'll just set up the form with the ASIN
+      // For now, we'll just set up the form with the ASIN reference
       // In production, you would call an Amazon API or scraping service
       setProduct(prev => ({
         ...prev,
-        source_asin: asin,
-        source_url: `https://www.amazon.com/dp/${asin}`,
+        asin_reference: asin,
       }))
 
       setStep('details')
@@ -148,15 +144,24 @@ export function ProductResearchForm() {
     setError('')
 
     try {
+      // Generate normalized_product_id from title
+      const normalizedId = product.title.trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '')
+        .substring(0, 50) + '-' + Date.now().toString(36)
+
+      // Generate sku_code
+      const skuCode = 'SKU-' + Date.now().toString(36).toUpperCase()
+
       const skuData = {
+        normalized_product_id: normalizedId,
+        sku_code: skuCode,
         title: product.title.trim(),
-        description: product.description.trim(),
+        description: product.description.trim() || null,
         bullet_points: product.bullet_points.filter(bp => bp.trim()),
         cost_price: product.cost_price,
         sell_price: product.sell_price,
-        source_url: product.source_url || null,
-        source_asin: product.source_asin || null,
-        image_url: product.image_url || null,
         pattern_id: product.pattern_id || null,
         status: 'ready',
       }
@@ -246,13 +251,13 @@ export function ProductResearchForm() {
         </div>
       )}
 
-      {product.source_asin && (
+      {product.asin_reference && (
         <div className="p-3 bg-gray-50 border border-gray-200 rounded-md">
           <div className="flex items-center text-sm text-gray-600">
             <Package className="h-4 w-4 mr-2" />
-            ASIN: <span className="font-mono ml-1">{product.source_asin}</span>
+            ASIN Reference: <span className="font-mono ml-1">{product.asin_reference}</span>
             <a
-              href={product.source_url}
+              href={`https://www.amazon.com/dp/${product.asin_reference}`}
               target="_blank"
               rel="noopener noreferrer"
               className="ml-auto text-blue-600 hover:underline"
@@ -378,19 +383,6 @@ export function ProductResearchForm() {
             </option>
           ))}
         </select>
-      </div>
-
-      <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">
-          Image URL (Optional)
-        </label>
-        <input
-          type="url"
-          value={product.image_url}
-          onChange={(e) => setProduct(prev => ({ ...prev, image_url: e.target.value }))}
-          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-          placeholder="https://..."
-        />
       </div>
 
       <div className="flex gap-3 pt-4">
