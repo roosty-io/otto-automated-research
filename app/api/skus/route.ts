@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
+import { checkPolicy } from '@/lib/policy'
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams
@@ -44,6 +45,7 @@ export async function POST(request: NextRequest) {
       cost_price,
       sell_price,
       status = 'draft',
+      skip_policy_check = false,  // Allow bypassing for internal/seed use
     } = body
 
     if (!sku_code || !title || !cost_price || !sell_price) {
@@ -51,6 +53,48 @@ export async function POST(request: NextRequest) {
         { error: 'sku_code, title, cost_price, and sell_price are required' },
         { status: 400 }
       )
+    }
+
+    // Run policy compliance check (unless explicitly skipped)
+    if (!skip_policy_check) {
+      const policyResult = checkPolicy({
+        title,
+        description,
+        bulletPoints: bullet_points,
+        costPrice: cost_price,
+        sellPrice: sell_price,
+      })
+
+      if (policyResult.decision === 'blocked') {
+        return NextResponse.json(
+          {
+            error: 'Product failed policy compliance check',
+            policyResult: {
+              decision: policyResult.decision,
+              score: policyResult.score,
+              flags: policyResult.flags.filter(f => f.severity === 'block'),
+              recommendations: policyResult.recommendations,
+            },
+          },
+          { status: 422 }
+        )
+      }
+
+      // For review_required, we still create but with draft status and warning
+      if (policyResult.decision === 'review_required' && status === 'ready') {
+        return NextResponse.json(
+          {
+            error: 'Product requires manual review before listing',
+            policyResult: {
+              decision: policyResult.decision,
+              score: policyResult.score,
+              flags: policyResult.flags,
+              recommendations: policyResult.recommendations,
+            },
+          },
+          { status: 422 }
+        )
+      }
     }
 
     // Check if SKU code already exists

@@ -1,8 +1,23 @@
 'use client'
 
 import { useState } from 'react'
-import { Loader2, Search, Plus, DollarSign, Package, Tag } from 'lucide-react'
+import { Loader2, Search, Plus, DollarSign, Package, Tag, AlertTriangle, ShieldX, ShieldCheck } from 'lucide-react'
 import { useRouter } from 'next/navigation'
+
+interface PolicyFlag {
+  type: string
+  severity: 'block' | 'warn' | 'review'
+  message: string
+  matched: string
+  details?: string
+}
+
+interface PolicyResult {
+  decision: 'approved' | 'blocked' | 'review_required'
+  score: number
+  flags: PolicyFlag[]
+  recommendations: string[]
+}
 
 interface ProductData {
   title: string
@@ -28,6 +43,8 @@ export function ProductResearchForm() {
   const [error, setError] = useState('')
   const [amazonInput, setAmazonInput] = useState('')
   const [patterns, setPatterns] = useState<Pattern[]>([])
+  const [policyResult, setPolicyResult] = useState<PolicyResult | null>(null)
+  const [checkingPolicy, setCheckingPolicy] = useState(false)
   const [product, setProduct] = useState<ProductData>({
     title: '',
     description: '',
@@ -123,6 +140,36 @@ export function ProductResearchForm() {
     return { profit, margin }
   }
 
+  async function runPolicyCheck() {
+    if (!product.title.trim()) return
+
+    setCheckingPolicy(true)
+    setPolicyResult(null)
+
+    try {
+      const res = await fetch('/api/policy-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: product.title.trim(),
+          description: product.description.trim(),
+          bulletPoints: product.bullet_points.filter(bp => bp.trim()),
+          costPrice: product.cost_price,
+          sellPrice: product.sell_price,
+        }),
+      })
+
+      if (res.ok) {
+        const result = await res.json()
+        setPolicyResult(result)
+      }
+    } catch (err) {
+      console.error('Policy check failed:', err)
+    } finally {
+      setCheckingPolicy(false)
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
 
@@ -166,6 +213,11 @@ export function ProductResearchForm() {
 
       if (!res.ok) {
         const data = await res.json()
+        // Handle policy check failure
+        if (data.policyResult) {
+          setPolicyResult(data.policyResult)
+          throw new Error(data.error)
+        }
         throw new Error(data.error || 'Failed to create SKU')
       }
 
@@ -177,6 +229,72 @@ export function ProductResearchForm() {
     } finally {
       setLoading(false)
     }
+  }
+
+  function PolicyCheckDisplay() {
+    if (!policyResult) return null
+
+    const getDecisionColor = () => {
+      switch (policyResult.decision) {
+        case 'approved': return 'bg-green-50 border-green-200'
+        case 'blocked': return 'bg-red-50 border-red-200'
+        case 'review_required': return 'bg-yellow-50 border-yellow-200'
+      }
+    }
+
+    const getDecisionIcon = () => {
+      switch (policyResult.decision) {
+        case 'approved': return <ShieldCheck className="h-5 w-5 text-green-600" />
+        case 'blocked': return <ShieldX className="h-5 w-5 text-red-600" />
+        case 'review_required': return <AlertTriangle className="h-5 w-5 text-yellow-600" />
+      }
+    }
+
+    return (
+      <div className={`p-4 rounded-md border ${getDecisionColor()}`}>
+        <div className="flex items-center gap-2 mb-2">
+          {getDecisionIcon()}
+          <span className="font-medium capitalize">
+            {policyResult.decision.replace('_', ' ')}
+          </span>
+          <span className="text-sm text-gray-500 ml-auto">
+            Score: {policyResult.score}/100
+          </span>
+        </div>
+
+        {policyResult.flags.length > 0 && (
+          <div className="mt-3 space-y-2">
+            <p className="text-sm font-medium text-gray-700">Issues Found:</p>
+            {policyResult.flags.map((flag, i) => (
+              <div
+                key={i}
+                className={`text-sm p-2 rounded ${
+                  flag.severity === 'block' ? 'bg-red-100 text-red-800' :
+                  flag.severity === 'warn' ? 'bg-yellow-100 text-yellow-800' :
+                  'bg-gray-100 text-gray-800'
+                }`}
+              >
+                <span className="font-medium">{flag.message}</span>
+                {flag.details && (
+                  <p className="text-xs mt-1 opacity-75">{flag.details}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {policyResult.recommendations.length > 0 && (
+          <div className="mt-3">
+            <p className="text-sm font-medium text-gray-700">Recommendations:</p>
+            <ul className="text-sm text-gray-600 list-disc list-inside mt-1">
+              {policyResult.recommendations.map((rec, i) => (
+                <li key={i}>{rec}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    )
   }
 
   const { profit, margin } = calculateProfit()
@@ -377,6 +495,37 @@ export function ProductResearchForm() {
         </select>
       </div>
 
+      {/* Policy Check Section */}
+      <div className="border-t pt-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-medium text-gray-700">Policy Compliance Check</h3>
+          <button
+            type="button"
+            onClick={runPolicyCheck}
+            disabled={checkingPolicy || !product.title.trim()}
+            className="inline-flex items-center px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+          >
+            {checkingPolicy ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                Checking...
+              </>
+            ) : (
+              <>
+                <ShieldCheck className="h-4 w-4 mr-1" />
+                Check Policy
+              </>
+            )}
+          </button>
+        </div>
+        <PolicyCheckDisplay />
+        {!policyResult && !checkingPolicy && (
+          <p className="text-sm text-gray-500">
+            Click &quot;Check Policy&quot; to validate this product before creating the SKU.
+          </p>
+        )}
+      </div>
+
       <div className="flex gap-3 pt-4">
         <button
           type="button"
@@ -388,7 +537,7 @@ export function ProductResearchForm() {
         </button>
         <button
           type="submit"
-          disabled={loading}
+          disabled={loading || (policyResult?.decision === 'blocked')}
           className="flex-1 inline-flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
         >
           {loading ? (
