@@ -36,112 +36,146 @@ export async function POST() {
 
     results.patternsFound = allPatterns?.length || 0
 
-    // 2. Create sample SKUs (matching actual database schema)
-    const skusToCreate = [
+    // 2. Create sample SKUs (need to create raw_products and normalized_products first)
+    const skuData = [
       {
-        normalized_product_id: 'phone-car-mount-universal-001',
         sku_code: 'ELEC-PHN-001',
         title: 'Universal Phone Car Mount Holder',
         description: 'Adjustable car phone mount with 360° rotation. Fits phones 4-7 inches.',
         bullet_points: ['360° rotation', 'One-hand operation', 'Strong suction cup', 'Fits 4-7 inch phones', 'Dashboard or windshield mount'],
         cost_price: 8.50,
         sell_price: 24.99,
-        status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Phone Accessories')?.id || null,
+        subcategory: 'Phone Accessories',
       },
       {
-        normalized_product_id: 'usbc-usba-adapter-4pack-001',
         sku_code: 'ELEC-CMP-001',
         title: 'USB-C to USB-A Adapter 4-Pack',
         description: 'High-speed USB-C male to USB-A female adapter. Compatible with laptops, tablets, and phones.',
         bullet_points: ['USB 3.0 speed', '4-pack value', 'Compact design', 'Universal compatibility', 'Durable aluminum build'],
         cost_price: 5.20,
         sell_price: 15.99,
-        status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Computer Accessories')?.id || null,
+        subcategory: 'Computer Accessories',
       },
       {
-        normalized_product_id: 'silicone-utensil-set-10pc-001',
         sku_code: 'HOME-KIT-001',
         title: 'Silicone Kitchen Utensil Set 10-Piece',
         description: 'Heat-resistant silicone cooking utensils. Non-stick safe with wooden handles.',
         bullet_points: ['Heat resistant to 480°F', '10 essential utensils', 'Non-stick safe', 'Wooden handles', 'Dishwasher safe'],
         cost_price: 12.00,
         sell_price: 34.99,
-        status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Kitchen Tools')?.id || null,
+        subcategory: 'Kitchen Tools',
       },
       {
-        normalized_product_id: 'drawer-organizer-8pack-001',
         sku_code: 'HOME-ORG-001',
         title: 'Drawer Organizer Set 8-Pack',
         description: 'Adjustable drawer dividers for kitchen, office, or bedroom organization.',
         bullet_points: ['8 different sizes', 'Interlocking design', 'Clear acrylic material', 'Easy to clean', 'Fits standard drawers'],
         cost_price: 9.75,
         sell_price: 28.99,
-        status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Organization')?.id || null,
+        subcategory: 'Organization',
       },
       {
-        normalized_product_id: 'resistance-bands-handles-001',
         sku_code: 'SPRT-FIT-001',
         title: 'Resistance Bands Set with Handles',
         description: 'Complete resistance band set with 5 bands, handles, door anchor, and ankle straps.',
         bullet_points: ['5 resistance levels', 'Includes handles', 'Door anchor included', 'Ankle straps', 'Carry bag included'],
         cost_price: 11.50,
         sell_price: 32.99,
-        status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Fitness')?.id || null,
+        subcategory: 'Fitness',
       },
       {
-        normalized_product_id: 'wireless-charger-15w-001',
         sku_code: 'ELEC-PHN-002',
         title: 'Wireless Charging Pad Fast Charger',
         description: '15W fast wireless charger compatible with iPhone and Android. LED indicator.',
         bullet_points: ['15W fast charging', 'iPhone/Android compatible', 'LED charging indicator', 'Slim design', 'Overcharge protection'],
         cost_price: 7.80,
         sell_price: 22.99,
-        status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Phone Accessories')?.id || null,
+        subcategory: 'Phone Accessories',
       },
       {
-        normalized_product_id: 'laptop-stand-aluminum-001',
         sku_code: 'ELEC-CMP-002',
         title: 'Laptop Stand Adjustable Aluminum',
         description: 'Ergonomic laptop stand with 6 height levels. Fits laptops 10-17 inches.',
         bullet_points: ['6 height adjustments', 'Aluminum construction', 'Ventilated design', 'Fits 10-17 inch laptops', 'Foldable for travel'],
         cost_price: 14.25,
         sell_price: 39.99,
-        status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Computer Accessories')?.id || null,
+        subcategory: 'Computer Accessories',
       },
       {
-        normalized_product_id: 'vegetable-chopper-12in1-001',
         sku_code: 'HOME-KIT-002',
         title: 'Vegetable Chopper Dicer 12-in-1',
         description: 'Multi-function vegetable cutter with interchangeable blades. Container included.',
         bullet_points: ['12 blade options', 'Container catches food', 'Stainless steel blades', 'Non-slip base', 'Hand guard included'],
         cost_price: 15.50,
         sell_price: 44.99,
-        status: 'ready',
-        pattern_id: allPatterns?.find(p => p.subcategory === 'Kitchen Tools')?.id || null,
+        subcategory: 'Kitchen Tools',
       },
     ]
 
-    // Insert SKUs one by one to get better error handling
+    // Insert SKUs one by one, creating required raw_products and normalized_products first
     let skusCreated = 0
     const skuErrors: string[] = []
 
-    for (const sku of skusToCreate) {
-      const { data, error } = await supabase
-        .from('skus')
-        .insert(sku)
-        .select()
+    for (const item of skuData) {
+      try {
+        // 1. Create raw_product
+        const { data: rawProduct, error: rawError } = await supabase
+          .from('raw_products')
+          .insert({
+            asin: `SEED-${item.sku_code}`,
+            title: item.title,
+            is_processed: true,
+            processed_at: new Date().toISOString(),
+            source: 'seed',
+          })
+          .select()
+          .single()
 
-      if (error) {
-        skuErrors.push(`${sku.title.substring(0, 20)}: ${error.message}`)
-      } else if (data) {
-        skusCreated++
+        if (rawError) {
+          skuErrors.push(`${item.title.substring(0, 20)}: raw_product - ${rawError.message}`)
+          continue
+        }
+
+        // 2. Create normalized_product
+        const { data: normalizedProduct, error: normError } = await supabase
+          .from('normalized_products')
+          .insert({
+            raw_product_id: rawProduct.id,
+            normalized_title: item.title,
+            normalized_category: item.subcategory,
+            cost_price: item.cost_price,
+            suggested_sell_price: item.sell_price,
+          })
+          .select()
+          .single()
+
+        if (normError) {
+          skuErrors.push(`${item.title.substring(0, 20)}: normalized_product - ${normError.message}`)
+          continue
+        }
+
+        // 3. Create SKU
+        const { error: skuError } = await supabase
+          .from('skus')
+          .insert({
+            normalized_product_id: normalizedProduct.id,
+            pattern_id: allPatterns?.find(p => p.subcategory === item.subcategory)?.id || null,
+            sku_code: item.sku_code,
+            title: item.title,
+            description: item.description,
+            bullet_points: item.bullet_points,
+            cost_price: item.cost_price,
+            sell_price: item.sell_price,
+            status: 'ready',
+          })
+
+        if (skuError) {
+          skuErrors.push(`${item.title.substring(0, 20)}: sku - ${skuError.message}`)
+        } else {
+          skusCreated++
+        }
+      } catch (err) {
+        skuErrors.push(`${item.title.substring(0, 20)}: ${err instanceof Error ? err.message : 'Unknown error'}`)
       }
     }
 

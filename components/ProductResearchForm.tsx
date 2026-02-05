@@ -144,18 +144,10 @@ export function ProductResearchForm() {
     setError('')
 
     try {
-      // Generate normalized_product_id from title
-      const normalizedId = product.title.trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '')
-        .substring(0, 50) + '-' + Date.now().toString(36)
-
       // Generate sku_code
       const skuCode = 'SKU-' + Date.now().toString(36).toUpperCase()
 
       const skuData = {
-        normalized_product_id: normalizedId,
         sku_code: skuCode,
         title: product.title.trim(),
         description: product.description.trim() || null,
