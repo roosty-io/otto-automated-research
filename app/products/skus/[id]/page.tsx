@@ -28,8 +28,7 @@ async function getAvailableStores(skuId: string) {
 
   let query = supabase
     .from('stores')
-    .select('id, store_name, ebay_username, current_active_listings, store_tiers(tier_name)')
-    .eq('is_active', true)
+    .select('id, store_name, ebay_username, current_active_listings, is_active, store_tiers(tier_name)')
     .order('store_name')
 
   if (assignedStoreIds.length > 0) {

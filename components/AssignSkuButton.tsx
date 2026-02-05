@@ -9,6 +9,7 @@ interface StoreOption {
   store_name: string
   ebay_username: string
   current_active_listings: number
+  is_active: boolean
   store_tiers: { tier_name: string } | null
 }
 
@@ -118,7 +119,7 @@ export function AssignSkuButton({ skuId, skuCode, stores }: Props) {
                       <option value="">Choose a store...</option>
                       {stores.map((store) => (
                         <option key={store.id} value={store.id}>
-                          {store.store_name} (@{store.ebay_username}) - {store.store_tiers?.tier_name || 'Unknown'} - {store.current_active_listings} listings
+                          {store.store_name} (@{store.ebay_username}) - {store.store_tiers?.tier_name || 'Unknown'} - {store.current_active_listings} listings{!store.is_active ? ' (INACTIVE)' : ''}
                         </option>
                       ))}
                     </select>
