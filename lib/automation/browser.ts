@@ -1,9 +1,34 @@
-import puppeteer from 'puppeteer-extra'
-import StealthPlugin from 'puppeteer-extra-plugin-stealth'
+/**
+ * Browser Pool for Puppeteer automation
+ *
+ * Uses dynamic imports to avoid webpack bundling issues with puppeteer-extra
+ */
+
 import type { Browser, Page, PuppeteerLaunchOptions } from 'puppeteer-core'
 
-// Add stealth plugin to avoid detection
-puppeteer.use(StealthPlugin())
+// Lazy-loaded puppeteer instance
+let puppeteerInstance: any = null
+let stealthInitialized = false
+
+async function getPuppeteer() {
+  if (!puppeteerInstance) {
+    // Dynamic import to avoid webpack bundling issues
+    const puppeteerExtra = await import('puppeteer-extra')
+    puppeteerInstance = puppeteerExtra.default
+
+    // Add stealth plugin only once
+    if (!stealthInitialized) {
+      try {
+        const StealthPlugin = (await import('puppeteer-extra-plugin-stealth')).default
+        puppeteerInstance.use(StealthPlugin())
+        stealthInitialized = true
+      } catch (error) {
+        console.warn('[BrowserPool] Stealth plugin not available, continuing without it')
+      }
+    }
+  }
+  return puppeteerInstance
+}
 
 // Browser pool configuration
 interface BrowserPoolConfig {
@@ -115,6 +140,7 @@ class BrowserPool {
     const id = this.generateId()
     console.log(`[BrowserPool] Launching new browser: ${id}`)
 
+    const puppeteer = await getPuppeteer()
     const browser = await puppeteer.launch(this.getLaunchOptions())
 
     this.browsers.set(id, {

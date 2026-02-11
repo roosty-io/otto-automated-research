@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic'
+
 import { supabase } from '@/lib/supabase'
 import { AddStoreForm } from '@/components/AddStoreForm'
 import Link from 'next/link'
