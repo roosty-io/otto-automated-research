@@ -9,6 +9,11 @@ import { searchZikProducts, getCategories } from '@/lib/automation/zik'
 import { getKeepaClient } from '@/lib/integrations/keepa'
 import { supabase } from '@/lib/supabase'
 import { continuePipeline } from '@/lib/pipeline'
+import {
+  normalizeProduct as aiNormalizeProduct,
+  calculateQualityScore as aiCalculateQualityScore,
+  generateSku as aiGenerateSku,
+} from '@/lib/ai'
 
 /**
  * ZIK Research Job Handler
@@ -422,11 +427,51 @@ async function saveKeepaProducts(products: any[], domain: string): Promise<{ sav
 }
 
 async function normalizeProduct(rawProduct: any): Promise<any | null> {
-  // Basic normalization without AI
-  // In production, this would call Claude API for better results
-
   if (!rawProduct.title) return null
 
+  // Try AI normalization if API key is available
+  if (process.env.ANTHROPIC_API_KEY) {
+    try {
+      const aiResult = await aiNormalizeProduct({
+        id: rawProduct.id,
+        title: rawProduct.title,
+        brand: rawProduct.brand,
+        category: rawProduct.category,
+        description: rawProduct.description,
+        amazonPrice: rawProduct.amazon_price,
+        ebayPrice: rawProduct.ebay_price,
+        salesRank: rawProduct.sales_rank,
+        reviewCount: rawProduct.review_count,
+        rating: rawProduct.rating,
+        asin: rawProduct.asin,
+      })
+
+      return {
+        raw_product_id: rawProduct.id,
+        normalized_title: aiResult.normalizedTitle,
+        normalized_category: aiResult.normalizedCategory,
+        normalized_brand: aiResult.normalizedBrand,
+        subcategory: aiResult.subcategory,
+        bullet_points: aiResult.bulletPoints,
+        key_features: aiResult.keyFeatures,
+        specifications: aiResult.specifications,
+        target_audience: aiResult.targetAudience,
+        use_case: aiResult.useCase,
+        quality_signals: aiResult.qualitySignals,
+        seo_keywords: aiResult.seoKeywords,
+        suggested_tags: aiResult.suggestedTags,
+        confidence_score: aiResult.confidenceScore,
+        cost_price: rawProduct.amazon_price || 0,
+        quality_score: null, // Will be calculated separately
+        demand_confidence: null,
+        ai_model: 'claude-sonnet-4-20250514',
+      }
+    } catch (error) {
+      console.warn('AI normalization failed, falling back to basic:', error)
+    }
+  }
+
+  // Fallback to basic normalization
   const title = rawProduct.title
     .replace(/\s+/g, ' ')
     .trim()
@@ -439,13 +484,13 @@ async function normalizeProduct(rawProduct: any): Promise<any | null> {
     normalized_brand: rawProduct.brand || 'Unbranded',
     bullet_points: [],
     cost_price: rawProduct.amazon_price || 0,
-    quality_score: calculateQualityScore(rawProduct),
+    quality_score: calculateBasicQualityScore(rawProduct),
     demand_confidence: calculateDemandConfidence(rawProduct),
     ai_model: 'basic',
   }
 }
 
-function calculateQualityScore(product: any): number {
+function calculateBasicQualityScore(product: any): number {
   let score = 50 // Base score
 
   // Rating bonus
