@@ -1,0 +1,10 @@
+# https://www.robotstxt.org/robotstxt.html
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: https://ottoresearch.io/sitemap.xml
+
+# Disallow admin/api routes
+Disallow: /api/
+Disallow: /settings/
