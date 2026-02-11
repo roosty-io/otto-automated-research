@@ -55,3 +55,16 @@ export {
   blockResources,
   evaluate,
 } from './helpers'
+
+// Rate limiting
+export {
+  getRateLimiter,
+  rateLimiter,
+  RATE_LIMITS,
+  RateLimiter,
+  type RateLimitConfig,
+  type RateLimitStatus,
+} from './rate-limiter'
+
+// ZIK Analytics automation
+export * from './zik'
