@@ -3,8 +3,8 @@ import './globals.css'
 import { Sidebar } from '@/components/Sidebar'
 
 export const metadata: Metadata = {
-  title: 'PPME Admin Dashboard',
-  description: 'Product Pattern Manufacturing Engine - Admin Dashboard',
+  title: 'OTTO Research Labs',
+  description: 'Automated eBay dropshipping product research and listing optimization',
 }
 
 export default function RootLayout({

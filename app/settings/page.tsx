@@ -1,7 +1,24 @@
 import { supabase } from '@/lib/supabase'
-import { Settings, Database, Shield, Zap, FlaskConical } from 'lucide-react'
+import Link from 'next/link'
+import {
+  Settings,
+  Database,
+  Shield,
+  Zap,
+  FlaskConical,
+  User,
+  CreditCard,
+  Bell,
+  Link as LinkIcon,
+  ChevronRight,
+} from 'lucide-react'
 import { CronJobTriggers } from '@/components/CronJobTriggers'
 import { SeedDataButton } from '@/components/SeedDataButton'
+
+export const metadata = {
+  title: 'Settings | OTTO Research Labs',
+  description: 'Configure your OTTO account and preferences',
+}
 
 export const dynamic = 'force-dynamic'
 
@@ -21,24 +38,70 @@ async function getMaturityTiers() {
   return data || []
 }
 
+function SettingsNavCard({
+  title,
+  description,
+  icon: Icon,
+  href,
+}: {
+  title: string
+  description: string
+  icon: React.ElementType
+  href: string
+}) {
+  return (
+    <Link
+      href={href}
+      className="flex items-center justify-between p-4 bg-white rounded-xl border border-gray-100 shadow-sm hover:shadow-md hover:border-indigo-200 transition-all group"
+    >
+      <div className="flex items-center">
+        <div className="h-10 w-10 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
+          <Icon className="h-5 w-5 text-white" />
+        </div>
+        <div className="ml-4">
+          <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+          <p className="text-sm text-gray-500">{description}</p>
+        </div>
+      </div>
+      <ChevronRight className="h-5 w-5 text-gray-400 group-hover:text-indigo-600 transition-colors" />
+    </Link>
+  )
+}
+
 export default async function SettingsPage() {
   const [tiers, maturityTiers] = await Promise.all([
     getTiers(),
     getMaturityTiers(),
   ])
 
+  const settingsNav = [
+    { title: 'Account', description: 'Manage your profile and preferences', icon: User, href: '/settings/account' },
+    { title: 'Billing', description: 'Subscription and payment methods', icon: CreditCard, href: '/settings/billing' },
+    { title: 'Notifications', description: 'Email and alert preferences', icon: Bell, href: '/settings/notifications' },
+    { title: 'Integrations', description: 'Connect eBay, AutoDS, and more', icon: LinkIcon, href: '/settings/integrations' },
+  ]
+
   return (
-    <div className="p-8">
+    <div className="p-8 bg-gray-50 min-h-screen">
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-gray-900">Settings</h1>
-        <p className="text-gray-500 mt-1">System configuration and tier management</p>
+        <p className="text-gray-500 mt-1">Manage your account and preferences</p>
+      </div>
+
+      {/* Quick Settings Navigation */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+        {settingsNav.map((item) => (
+          <SettingsNavCard key={item.title} {...item} />
+        ))}
       </div>
 
       {/* Store Tiers */}
-      <div className="bg-white rounded-lg shadow mb-8">
-        <div className="px-6 py-4 border-b border-gray-200">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 mb-8">
+        <div className="px-6 py-4 border-b border-gray-100">
           <div className="flex items-center">
-            <Database className="h-5 w-5 text-gray-500 mr-2" />
+            <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center mr-3">
+              <Database className="h-4 w-4 text-white" />
+            </div>
             <h2 className="text-lg font-semibold text-gray-900">Store Tiers</h2>
           </div>
           <p className="text-sm text-gray-500 mt-1">
@@ -94,10 +157,12 @@ export default async function SettingsPage() {
       </div>
 
       {/* Maturity Tiers */}
-      <div className="bg-white rounded-lg shadow mb-8">
-        <div className="px-6 py-4 border-b border-gray-200">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 mb-8">
+        <div className="px-6 py-4 border-b border-gray-100">
           <div className="flex items-center">
-            <Shield className="h-5 w-5 text-gray-500 mr-2" />
+            <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center mr-3">
+              <Shield className="h-4 w-4 text-white" />
+            </div>
             <h2 className="text-lg font-semibold text-gray-900">Store Maturity Levels</h2>
           </div>
           <p className="text-sm text-gray-500 mt-1">
@@ -145,10 +210,12 @@ export default async function SettingsPage() {
       </div>
 
       {/* Automated Tasks */}
-      <div className="bg-white rounded-lg shadow mb-8">
-        <div className="px-6 py-4 border-b border-gray-200">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 mb-8">
+        <div className="px-6 py-4 border-b border-gray-100">
           <div className="flex items-center">
-            <Zap className="h-5 w-5 text-gray-500 mr-2" />
+            <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center mr-3">
+              <Zap className="h-4 w-4 text-white" />
+            </div>
             <h2 className="text-lg font-semibold text-gray-900">Automated Tasks</h2>
           </div>
           <p className="text-sm text-gray-500 mt-1">
@@ -161,10 +228,12 @@ export default async function SettingsPage() {
       </div>
 
       {/* Developer Tools */}
-      <div className="bg-white rounded-lg shadow mb-8">
-        <div className="px-6 py-4 border-b border-gray-200">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 mb-8">
+        <div className="px-6 py-4 border-b border-gray-100">
           <div className="flex items-center">
-            <FlaskConical className="h-5 w-5 text-gray-500 mr-2" />
+            <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center mr-3">
+              <FlaskConical className="h-4 w-4 text-white" />
+            </div>
             <h2 className="text-lg font-semibold text-gray-900">Developer Tools</h2>
           </div>
           <p className="text-sm text-gray-500 mt-1">
@@ -183,10 +252,12 @@ export default async function SettingsPage() {
       </div>
 
       {/* System Info */}
-      <div className="bg-white rounded-lg shadow">
-        <div className="px-6 py-4 border-b border-gray-200">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100">
+        <div className="px-6 py-4 border-b border-gray-100">
           <div className="flex items-center">
-            <Settings className="h-5 w-5 text-gray-500 mr-2" />
+            <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center mr-3">
+              <Settings className="h-4 w-4 text-white" />
+            </div>
             <h2 className="text-lg font-semibold text-gray-900">System Information</h2>
           </div>
         </div>
