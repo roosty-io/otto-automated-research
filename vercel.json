@@ -1,5 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "regions": ["iad1"],
   "crons": [
     {
       "path": "/api/cron/process-jobs",
@@ -46,6 +48,15 @@
     },
     "app/api/autods/**/*.ts": {
       "maxDuration": 120
+    },
+    "app/api/webhooks/**/*.ts": {
+      "maxDuration": 60
+    },
+    "app/api/billing/route.ts": {
+      "maxDuration": 30
+    },
+    "app/api/auth/route.ts": {
+      "maxDuration": 30
     }
   },
   "headers": [
