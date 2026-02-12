@@ -1,16 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
+import { verifyCronSecret } from '@/lib/middleware/auth'
+import { batchInsert } from '@/lib/database/batch-operations'
 
 // Job processor - picks up pending jobs and executes them
 // Creates SKU assignments for stores based on job type
 
 export async function GET(request: NextRequest) {
-  const authHeader = request.headers.get('authorization')
-  const cronSecret = process.env.CRON_SECRET
-
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  // SECURITY: Require CRON_SECRET
+  const authError = verifyCronSecret(request)
+  if (authError) return authError
 
   return processJobs()
 }
@@ -108,26 +107,24 @@ async function processJobs() {
           throw new Error('No available SKUs for assignment')
         }
 
-        // Create assignments
-        for (const sku of availableSkus) {
-          try {
-            const { error: assignError } = await supabase
-              .from('store_sku_assignments')
-              .insert({
-                store_id: store.id,
-                sku_id: sku.id,
-                listing_status: 'active',
-                listed_at: new Date().toISOString(),
-              })
+        // Create assignments in batch (scalable - prevents N+1 queries)
+        const assignments = availableSkus.map(sku => ({
+          store_id: store.id,
+          sku_id: sku.id,
+          listing_status: 'active',
+          listed_at: new Date().toISOString(),
+          current_price: sku.sell_price || null
+        }))
 
-            if (assignError) {
-              jobResult.errors.push(`SKU ${sku.sku_code}: ${assignError.message}`)
-            } else {
-              jobResult.assigned++
-            }
-          } catch (err) {
-            jobResult.errors.push(`SKU ${sku.sku_code}: ${err instanceof Error ? err.message : 'Unknown error'}`)
-          }
+        const batchResult = await batchInsert('store_sku_assignments', assignments, {
+          chunkSize: 50,
+          onConflict: 'store_id,sku_id',
+          ignoreDuplicates: true
+        })
+
+        jobResult.assigned = batchResult.insertedCount
+        if (batchResult.errors) {
+          jobResult.errors.push(...batchResult.errors)
         }
 
         // Update job with results
