@@ -153,7 +153,7 @@ export async function sendNotification(notification: {
 }
 
 /**
- * Send email notification
+ * Send email notification via SendGrid
  */
 async function sendEmailNotification(notification: any): Promise<void> {
   // Get user preferences
@@ -168,25 +168,101 @@ async function sendEmailNotification(notification: any): Promise<void> {
     return
   }
 
-  // In production, integrate with email service (SendGrid, SES, etc.)
-  // For now, log the email that would be sent
-  console.log('[Notification] Would send email:', {
-    to: prefs.email,
-    subject: notification.title,
-    body: notification.message,
-    priority: notification.priority,
-  })
+  const apiKey = process.env.SENDGRID_API_KEY
+  if (!apiKey) {
+    console.log('[Notification] SendGrid API key not configured, skipping email')
+    return
+  }
 
-  // Example SendGrid integration:
-  // const sgMail = require('@sendgrid/mail')
-  // sgMail.setApiKey(process.env.SENDGRID_API_KEY)
-  // await sgMail.send({
-  //   to: prefs.email,
-  //   from: 'notifications@otto.app',
-  //   subject: notification.title,
-  //   text: notification.message,
-  //   html: generateEmailTemplate(notification),
-  // })
+  const fromEmail = process.env.EMAIL_FROM || 'noreply@ottoresearch.io'
+
+  try {
+    const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        personalizations: [
+          {
+            to: [{ email: prefs.email }],
+            subject: notification.title,
+          },
+        ],
+        from: { email: fromEmail, name: 'OTTO Research Labs' },
+        content: [
+          {
+            type: 'text/plain',
+            value: notification.message,
+          },
+          {
+            type: 'text/html',
+            value: generateEmailHtml(notification),
+          },
+        ],
+      }),
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error('[Notification] SendGrid error:', response.status, errorText)
+    } else {
+      console.log('[Notification] Email sent successfully to:', prefs.email)
+    }
+  } catch (error) {
+    console.error('[Notification] Email send error:', error)
+  }
+}
+
+/**
+ * Generate HTML email template
+ */
+function generateEmailHtml(notification: any): string {
+  const priorityColors: Record<string, string> = {
+    low: '#6b7280',
+    normal: '#3b82f6',
+    high: '#f59e0b',
+    urgent: '#ef4444',
+  }
+
+  const priorityColor = priorityColors[notification.priority] || '#3b82f6'
+
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background-color: #f3f4f6;">
+  <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+    <div style="background: ${priorityColor}; padding: 20px; color: white;">
+      <h1 style="margin: 0; font-size: 20px;">${notification.title}</h1>
+      <p style="margin: 5px 0 0; opacity: 0.9; font-size: 12px; text-transform: uppercase;">${notification.type.replace('_', ' ')}</p>
+    </div>
+    <div style="padding: 20px;">
+      <p style="margin: 0; color: #374151; line-height: 1.6;">${notification.message}</p>
+      ${notification.data ? `
+      <div style="margin-top: 20px; padding: 15px; background: #f9fafb; border-radius: 6px;">
+        <p style="margin: 0 0 10px; font-weight: 600; color: #111827;">Details</p>
+        ${Object.entries(notification.data).map(([key, value]) => `
+          <p style="margin: 5px 0; font-size: 14px; color: #6b7280;">
+            <strong>${key}:</strong> ${value}
+          </p>
+        `).join('')}
+      </div>
+      ` : ''}
+    </div>
+    <div style="padding: 15px 20px; background: #f9fafb; border-top: 1px solid #e5e7eb;">
+      <p style="margin: 0; font-size: 12px; color: #9ca3af;">
+        OTTO Research Labs | <a href="${process.env.NEXT_PUBLIC_APP_URL || 'https://ottoresearch.io'}" style="color: #3b82f6;">View Dashboard</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>
+  `.trim()
 }
 
 /**
