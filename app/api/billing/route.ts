@@ -12,6 +12,11 @@ import {
   STRIPE_TIERS,
   TierKey
 } from '@/lib/billing/stripe'
+import {
+  BillingActionSchema,
+  validateRequestBody,
+  validationErrorResponse
+} from '@/lib/validation'
 
 export async function POST(request: NextRequest) {
   try {
@@ -25,22 +30,20 @@ export async function POST(request: NextRequest) {
       }, { status: 401 })
     }
 
-    const body = await request.json()
-    const { action, ...data } = body
+    // Validate request body with Zod
+    const validation = await validateRequestBody(request, BillingActionSchema)
+    if (!validation.success) {
+      return validationErrorResponse(validation.error, validation.details)
+    }
+
+    const { action, ...data } = validation.data
     const origin = request.headers.get('origin') || process.env.NEXT_PUBLIC_APP_URL
 
     // ========================================
     // CREATE CHECKOUT SESSION
     // ========================================
     if (action === 'create-checkout') {
-      const { tier } = data as { tier: TierKey }
-
-      if (!tier || !STRIPE_TIERS[tier]) {
-        return NextResponse.json({
-          success: false,
-          error: 'Invalid tier'
-        }, { status: 400 })
-      }
+      const tier = (data as { tier: TierKey }).tier
 
       const session = await createCheckoutSession(
         user.id,
