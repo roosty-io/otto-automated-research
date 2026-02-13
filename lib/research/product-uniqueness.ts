@@ -5,8 +5,14 @@
  * - Fair distribution of products across users
  * - Reduced internal competition
  * - Better margins for all users
+ * - Decreased unique product discovery requirements at scale
  *
- * Default: Max 3 users per SKU
+ * Default: Max 6 users per SKU (internal, not public)
+ *
+ * Scale considerations:
+ * - At 10,000+ users, system needs 150k+ products/month
+ * - 6 users per product reduces discovery needs by 50%
+ * - Enables more efficient product circulation
  */
 
 import { supabase } from '../supabase'
@@ -49,7 +55,7 @@ export interface UniquenessConfig {
 }
 
 const DEFAULT_CONFIG: UniquenessConfig = {
-  maxUsersPerSku: 3,
+  maxUsersPerSku: 6, // Increased from 3 to reduce unique product discovery requirements
   reservationDurationHours: 72,
   cooldownAfterPruneHours: 24,
   prioritizeHighPerformers: true,
