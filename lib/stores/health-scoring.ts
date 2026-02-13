@@ -1,7 +1,9 @@
 // OTTO Research Labs - Store Health Scoring System
 // Intelligent store capacity and health assessment for optimal allocation
+// Enhanced with eBay Cassini algorithm optimization factors
 
 import { createClient } from '@supabase/supabase-js'
+import { CASSINI_THRESHOLDS } from '../research/cassini-optimizer'
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -26,8 +28,10 @@ export interface StoreHealthScore {
     capacityUtilization: number
     complianceScore: number
     growthPotential: number
+    cassiniReadiness: number  // New: Cassini algorithm optimization readiness
   }
   factors: StoreHealthFactors
+  cassiniStatus: CassiniStoreStatus  // New: Cassini-specific status
   recommendations: string[]
   allocationCapacity: {
     maxNewListings: number
@@ -35,6 +39,18 @@ export interface StoreHealthScore {
     riskLevel: 'low' | 'medium' | 'high'
   }
   lastCalculated: string
+}
+
+// Cassini-specific store status for algorithm optimization
+export interface CassiniStoreStatus {
+  isTopRated: boolean
+  topRatedPlusEligible: boolean
+  projectedVisibility: 'high' | 'medium' | 'low' | 'suppressed'
+  visibilityBoosts: string[]
+  visibilityPenalties: string[]
+  shippingScore: number  // 0-100 based on handling time and delivery
+  sellerMetricsScore: number  // 0-100 based on defect/late rates
+  avgListingCassiniScore: number  // Average Cassini score of active listings
 }
 
 export interface StoreHealthFactors {
@@ -59,6 +75,17 @@ export interface StoreHealthFactors {
   conversionRate: number
   avgDaysToShip: number
 
+  // Cassini-Specific Metrics (NEW)
+  handlingTimeDays: number  // Listed handling time (0-3 days ideal)
+  avgActualHandlingDays: number  // Actual time to ship
+  trackingUploadRate: number  // % of orders with tracking uploaded on time
+  onTimeDeliveryRate: number  // % of orders delivered on time
+  responseTimeHours: number  // Avg response time to buyer messages
+  isTopRatedSeller: boolean  // Top Rated Seller status
+  hasFreReturns: boolean  // Offers free returns (Cassini boost)
+  avgItemSpecificsCount: number  // Average item specifics per listing
+  avgTitleLength: number  // Average title length (80 chars optimal)
+
   // Compliance
   policyViolations: number
   veroWarnings: number
@@ -75,20 +102,62 @@ export interface StoreHealthFactors {
 // ============================================================================
 
 const SCORE_WEIGHTS = {
-  accountHealth: 0.25,      // 25% - Account standing is critical
-  salesPerformance: 0.20,   // 20% - Sales velocity matters
+  accountHealth: 0.20,      // 20% - Account standing (Cassini critical)
+  salesPerformance: 0.15,   // 15% - Sales velocity (Cassini signal)
   listingQuality: 0.15,     // 15% - Quality affects visibility
-  capacityUtilization: 0.15, // 15% - Room to grow
-  complianceScore: 0.15,    // 15% - Staying compliant
-  growthPotential: 0.10     // 10% - Future opportunity
+  capacityUtilization: 0.10, // 10% - Room to grow
+  complianceScore: 0.10,    // 10% - Staying compliant
+  growthPotential: 0.10,    // 10% - Future opportunity
+  cassiniReadiness: 0.20    // 20% - Cassini algorithm optimization (NEW)
 }
 
-// Thresholds for eBay account health
+// Thresholds for eBay account health - aligned with Cassini requirements
+// These directly affect Cassini visibility and Top Rated status
 const EBAY_THRESHOLDS = {
-  defectRate: { excellent: 0.5, good: 1.0, fair: 2.0 },
-  lateShipmentRate: { excellent: 3.0, good: 5.0, fair: 7.0 },
-  casesOpenRate: { excellent: 0.3, good: 0.5, fair: 1.0 },
-  feedbackScore: { excellent: 99.5, good: 98.0, fair: 95.0 }
+  // Defect rate: Items Not As Described + Cancellations
+  defectRate: {
+    topRated: 0.5,    // Required for Top Rated Seller
+    excellent: 0.5,
+    good: 1.0,
+    fair: 2.0,        // eBay "Above Standard" threshold
+    belowStandard: 2.0
+  },
+  // Late shipment rate: Ship by handling time + 1 day
+  lateShipmentRate: {
+    topRated: 3.0,    // Required for Top Rated Seller
+    excellent: 3.0,
+    good: 5.0,
+    fair: 7.0,        // eBay "Above Standard" threshold
+    belowStandard: 7.0
+  },
+  // Cases closed without seller resolution
+  casesOpenRate: {
+    topRated: 0.3,    // Required for Top Rated Seller
+    excellent: 0.3,
+    good: 0.5,
+    fair: 1.0
+  },
+  // Positive feedback percentage
+  feedbackScore: {
+    excellent: 99.5,  // Cassini strong signal
+    good: 98.0,       // Top Rated minimum
+    fair: 95.0,
+    poor: 90.0
+  },
+  // Handling time (Cassini prefers fast)
+  handlingTime: {
+    excellent: 0,     // Same-day handling
+    good: 1,          // Next-day handling
+    fair: 2,
+    poor: 3
+  },
+  // Response time to buyers (affects experience)
+  responseTimeHours: {
+    excellent: 4,
+    good: 12,
+    fair: 24,
+    poor: 48
+  }
 }
 
 // ============================================================================
@@ -96,14 +165,15 @@ const EBAY_THRESHOLDS = {
 // ============================================================================
 
 export async function calculateStoreHealth(storeId: string): Promise<StoreHealthScore | null> {
-  // Fetch all store data
+  // Fetch all store data including Cassini-relevant metrics
   const { data: store, error } = await supabase
     .from('stores')
     .select(`
       *,
       store_tiers(tier_name, max_total_listings, listing_allowance),
       store_sku_assignments(id, listing_status, created_at),
-      orders(id, total_amount, order_date, status)
+      orders(id, total_amount, order_date, status),
+      listings(id, cassini_score, status)
     `)
     .eq('id', storeId)
     .single()
@@ -114,11 +184,12 @@ export async function calculateStoreHealth(storeId: string): Promise<StoreHealth
   }
 
   const factors = extractFactors(store)
-  const components = calculateComponents(factors)
+  const cassiniStatus = calculateCassiniStatus(factors, store)
+  const components = calculateComponents(factors, cassiniStatus)
   const overallScore = calculateOverallScore(components)
   const healthStatus = getHealthStatus(overallScore)
-  const recommendations = generateRecommendations(factors, components)
-  const allocationCapacity = calculateAllocationCapacity(factors, overallScore)
+  const recommendations = generateRecommendations(factors, components, cassiniStatus)
+  const allocationCapacity = calculateAllocationCapacity(factors, overallScore, cassiniStatus)
 
   const result: StoreHealthScore = {
     storeId,
@@ -127,6 +198,7 @@ export async function calculateStoreHealth(storeId: string): Promise<StoreHealth
     healthStatus,
     components,
     factors,
+    cassiniStatus,
     recommendations,
     allocationCapacity,
     lastCalculated: new Date().toISOString()
@@ -192,6 +264,17 @@ function extractFactors(store: any): StoreHealthFactors {
     conversionRate,
     avgDaysToShip: store.avg_days_to_ship || 1.5,
 
+    // Cassini-Specific Metrics
+    handlingTimeDays: store.handling_time_days ?? 1,  // Default 1-day handling
+    avgActualHandlingDays: store.avg_actual_handling_days || 1.2,
+    trackingUploadRate: store.tracking_upload_rate || 95,
+    onTimeDeliveryRate: store.on_time_delivery_rate || 92,
+    responseTimeHours: store.response_time_hours || 12,
+    isTopRatedSeller: store.is_top_rated_seller || false,
+    hasFreReturns: store.has_free_returns || false,
+    avgItemSpecificsCount: store.avg_item_specifics_count || 6,
+    avgTitleLength: store.avg_title_length || 65,
+
     // Compliance
     policyViolations: store.policy_violations || 0,
     veroWarnings: store.vero_warnings || 0,
@@ -204,14 +287,161 @@ function extractFactors(store: any): StoreHealthFactors {
   }
 }
 
-function calculateComponents(factors: StoreHealthFactors): StoreHealthScore['components'] {
+// ============================================================================
+// CASSINI STATUS CALCULATION
+// ============================================================================
+
+function calculateCassiniStatus(factors: StoreHealthFactors, store: any): CassiniStoreStatus {
+  const boosts: string[] = []
+  const penalties: string[] = []
+
+  // Check Top Rated Seller eligibility
+  const meetsTopRatedDefect = factors.defectRate <= EBAY_THRESHOLDS.defectRate.topRated
+  const meetsTopRatedLateShip = factors.lateShipmentRate <= EBAY_THRESHOLDS.lateShipmentRate.topRated
+  const meetsTopRatedCases = factors.casesOpenRate <= EBAY_THRESHOLDS.casesOpenRate.topRated
+  const meetsTopRatedFeedback = factors.feedbackScore >= EBAY_THRESHOLDS.feedbackScore.good
+
+  const isTopRated = factors.isTopRatedSeller ||
+    (meetsTopRatedDefect && meetsTopRatedLateShip && meetsTopRatedCases && meetsTopRatedFeedback)
+
+  // Top Rated Plus eligibility (1-day handling + free returns)
+  const topRatedPlusEligible = isTopRated &&
+    factors.handlingTimeDays <= 1 &&
+    factors.hasFreReturns
+
+  // Calculate shipping score (critical for Cassini)
+  let shippingScore = 50
+
+  // Handling time scoring
+  if (factors.handlingTimeDays === 0) {
+    shippingScore += 30  // Same-day shipping
+    boosts.push('Same-day handling (+30%)')
+  } else if (factors.handlingTimeDays === 1) {
+    shippingScore += 25
+    boosts.push('1-day handling (+25%)')
+  } else if (factors.handlingTimeDays === 2) {
+    shippingScore += 10
+  } else {
+    shippingScore -= 10
+    penalties.push('Slow handling time (>2 days)')
+  }
+
+  // On-time delivery
+  if (factors.onTimeDeliveryRate >= 98) {
+    shippingScore += 15
+    boosts.push('Excellent on-time delivery')
+  } else if (factors.onTimeDeliveryRate >= 95) {
+    shippingScore += 10
+  } else if (factors.onTimeDeliveryRate < 90) {
+    shippingScore -= 15
+    penalties.push('Low on-time delivery rate')
+  }
+
+  // Tracking upload rate
+  if (factors.trackingUploadRate >= 99) {
+    shippingScore += 5
+  } else if (factors.trackingUploadRate < 95) {
+    shippingScore -= 10
+    penalties.push('Low tracking upload rate')
+  }
+
+  // Calculate seller metrics score (Cassini heavily weights this)
+  let sellerMetricsScore = 50
+
+  // Defect rate (most critical)
+  if (factors.defectRate <= 0.5) {
+    sellerMetricsScore += 25
+    boosts.push('Excellent defect rate (<0.5%)')
+  } else if (factors.defectRate <= 1.0) {
+    sellerMetricsScore += 15
+  } else if (factors.defectRate > 2.0) {
+    sellerMetricsScore -= 30
+    penalties.push('High defect rate - Cassini suppression risk')
+  }
+
+  // Late shipment rate
+  if (factors.lateShipmentRate <= 3.0) {
+    sellerMetricsScore += 20
+  } else if (factors.lateShipmentRate > 7.0) {
+    sellerMetricsScore -= 25
+    penalties.push('High late shipment rate - visibility reduction')
+  }
+
+  // Feedback score
+  if (factors.feedbackScore >= 99.5) {
+    sellerMetricsScore += 10
+    boosts.push('Top feedback score')
+  } else if (factors.feedbackScore < 95) {
+    sellerMetricsScore -= 15
+    penalties.push('Low feedback score')
+  }
+
+  // Response time bonus
+  if (factors.responseTimeHours <= 4) {
+    sellerMetricsScore += 5
+    boosts.push('Fast response time')
+  }
+
+  // Top Rated boost
+  if (isTopRated) {
+    boosts.push('Top Rated Seller (+15% visibility)')
+  }
+  if (topRatedPlusEligible) {
+    boosts.push('Top Rated Plus eligible (+20% visibility)')
+  }
+
+  // Free returns boost
+  if (factors.hasFreReturns) {
+    boosts.push('Free returns (+8% visibility)')
+  }
+
+  // Calculate average listing Cassini score
+  const listings = store.listings || []
+  const activeListings = listings.filter((l: any) => l.status === 'active' && l.cassini_score)
+  const avgListingCassiniScore = activeListings.length > 0
+    ? activeListings.reduce((sum: number, l: any) => sum + (l.cassini_score || 50), 0) / activeListings.length
+    : 50
+
+  // Determine projected visibility
+  const combinedScore = (shippingScore + sellerMetricsScore) / 2
+  let projectedVisibility: CassiniStoreStatus['projectedVisibility']
+
+  if (penalties.some(p => p.includes('suppression'))) {
+    projectedVisibility = 'suppressed'
+  } else if (combinedScore >= 80 && isTopRated) {
+    projectedVisibility = 'high'
+  } else if (combinedScore >= 65) {
+    projectedVisibility = 'medium'
+  } else if (combinedScore >= 45) {
+    projectedVisibility = 'low'
+  } else {
+    projectedVisibility = 'suppressed'
+  }
+
+  return {
+    isTopRated,
+    topRatedPlusEligible,
+    projectedVisibility,
+    visibilityBoosts: boosts,
+    visibilityPenalties: penalties,
+    shippingScore: Math.max(0, Math.min(100, shippingScore)),
+    sellerMetricsScore: Math.max(0, Math.min(100, sellerMetricsScore)),
+    avgListingCassiniScore: Math.round(avgListingCassiniScore)
+  }
+}
+
+function calculateComponents(
+  factors: StoreHealthFactors,
+  cassiniStatus: CassiniStoreStatus
+): StoreHealthScore['components'] {
   return {
     accountHealth: calculateAccountHealth(factors),
     salesPerformance: calculateSalesPerformance(factors),
-    listingQuality: calculateListingQuality(factors),
+    listingQuality: calculateListingQuality(factors, cassiniStatus),
     capacityUtilization: calculateCapacityScore(factors),
     complianceScore: calculateComplianceScore(factors),
-    growthPotential: calculateGrowthPotential(factors)
+    growthPotential: calculateGrowthPotential(factors),
+    cassiniReadiness: calculateCassiniReadiness(factors, cassiniStatus)
   }
 }
 
@@ -289,26 +519,92 @@ function calculateSalesPerformance(factors: StoreHealthFactors): number {
   return Math.max(0, Math.min(100, score))
 }
 
-function calculateListingQuality(factors: StoreHealthFactors): number {
-  let score = 70  // Default to good
+function calculateListingQuality(
+  factors: StoreHealthFactors,
+  cassiniStatus: CassiniStoreStatus
+): number {
+  let score = 50  // Start at middle
 
-  // Conversion rate indicator
+  // Conversion rate indicator (Cassini signal)
   if (factors.conversionRate >= 3) {
     score += 20
   } else if (factors.conversionRate >= 2) {
     score += 10
   } else if (factors.conversionRate < 1) {
-    score -= 20
+    score -= 15
   }
 
   // Return rate as quality indicator
   if (factors.returnRate <= 2) {
     score += 10
   } else if (factors.returnRate > 5) {
-    score -= 20
+    score -= 15
+  }
+
+  // Title length optimization (Cassini prefers 75-80 chars)
+  if (factors.avgTitleLength >= 75 && factors.avgTitleLength <= 80) {
+    score += 10
+  } else if (factors.avgTitleLength >= 60) {
+    score += 5
+  } else if (factors.avgTitleLength < 40) {
+    score -= 10
+  }
+
+  // Item specifics completeness (Cassini uses for filtering)
+  if (factors.avgItemSpecificsCount >= 10) {
+    score += 10
+  } else if (factors.avgItemSpecificsCount >= 6) {
+    score += 5
+  } else if (factors.avgItemSpecificsCount < 3) {
+    score -= 10
+  }
+
+  // Average Cassini score of listings
+  if (cassiniStatus.avgListingCassiniScore >= 80) {
+    score += 10
+  } else if (cassiniStatus.avgListingCassiniScore >= 60) {
+    score += 5
+  } else if (cassiniStatus.avgListingCassiniScore < 40) {
+    score -= 10
   }
 
   return Math.max(0, Math.min(100, score))
+}
+
+// NEW: Calculate Cassini algorithm readiness
+function calculateCassiniReadiness(
+  factors: StoreHealthFactors,
+  cassiniStatus: CassiniStoreStatus
+): number {
+  let score = 0
+
+  // Shipping score (40% of Cassini readiness)
+  score += cassiniStatus.shippingScore * 0.4
+
+  // Seller metrics score (40% of Cassini readiness)
+  score += cassiniStatus.sellerMetricsScore * 0.4
+
+  // Top Rated status bonus (10%)
+  if (cassiniStatus.isTopRated) {
+    score += 10
+  }
+  if (cassiniStatus.topRatedPlusEligible) {
+    score += 5  // Additional bonus
+  }
+
+  // Returns policy (5%)
+  if (factors.hasFreReturns) {
+    score += 5
+  }
+
+  // Response time (5%)
+  if (factors.responseTimeHours <= 4) {
+    score += 5
+  } else if (factors.responseTimeHours <= 12) {
+    score += 3
+  }
+
+  return Math.max(0, Math.min(100, Math.round(score)))
 }
 
 function calculateCapacityScore(factors: StoreHealthFactors): number {
@@ -385,28 +681,73 @@ function getHealthStatus(score: number): StoreHealthScore['healthStatus'] {
 
 function generateRecommendations(
   factors: StoreHealthFactors,
-  components: StoreHealthScore['components']
+  components: StoreHealthScore['components'],
+  cassiniStatus: CassiniStoreStatus
 ): string[] {
   const recommendations: string[] = []
 
-  // Account health recommendations
+  // CASSINI-SPECIFIC RECOMMENDATIONS (highest priority)
+  if (cassiniStatus.projectedVisibility === 'suppressed') {
+    recommendations.push('CRITICAL: Store at risk of Cassini suppression - fix seller metrics immediately')
+  }
+
+  // Top Rated pathway
+  if (!cassiniStatus.isTopRated && components.cassiniReadiness >= 60) {
+    const missing: string[] = []
+    if (factors.defectRate > 0.5) missing.push('defect rate ≤0.5%')
+    if (factors.lateShipmentRate > 3.0) missing.push('late shipment ≤3%')
+    if (factors.casesOpenRate > 0.3) missing.push('cases rate ≤0.3%')
+    if (missing.length > 0) {
+      recommendations.push(`Path to Top Rated (+15% visibility): Achieve ${missing.join(', ')}`)
+    }
+  }
+
+  // Top Rated Plus pathway
+  if (cassiniStatus.isTopRated && !cassiniStatus.topRatedPlusEligible) {
+    const missing: string[] = []
+    if (factors.handlingTimeDays > 1) missing.push('1-day handling')
+    if (!factors.hasFreReturns) missing.push('free returns')
+    if (missing.length > 0) {
+      recommendations.push(`Upgrade to Top Rated Plus (+20% visibility): Enable ${missing.join(' and ')}`)
+    }
+  }
+
+  // Shipping time optimization (Cassini critical)
+  if (factors.handlingTimeDays > 1) {
+    recommendations.push('Reduce handling time to 1 day or same-day for Cassini visibility boost')
+  }
+
+  // Account health recommendations (affects Cassini)
   if (components.accountHealth < 70) {
     if (factors.defectRate > EBAY_THRESHOLDS.defectRate.good) {
-      recommendations.push('Reduce defect rate by improving item descriptions and handling cases promptly')
+      recommendations.push('Reduce defect rate - directly impacts Cassini visibility and buyer trust')
     }
     if (factors.lateShipmentRate > EBAY_THRESHOLDS.lateShipmentRate.good) {
-      recommendations.push('Improve shipping speed - consider using faster suppliers or adjusting handling time')
+      recommendations.push('Reduce late shipments by using faster suppliers or adding handling time buffer')
     }
     if (factors.feedbackScore < EBAY_THRESHOLDS.feedbackScore.good) {
-      recommendations.push('Focus on customer service to improve feedback score')
+      recommendations.push('Improve feedback score - target 98%+ for better Cassini positioning')
     }
+  }
+
+  // Listing quality (Cassini signals)
+  if (factors.avgTitleLength < 70) {
+    recommendations.push('Optimize titles to 75-80 characters with relevant keywords for Cassini')
+  }
+  if (factors.avgItemSpecificsCount < 8) {
+    recommendations.push('Add more item specifics (8-12 recommended) for Cassini filter visibility')
+  }
+
+  // Response time (buyer experience)
+  if (factors.responseTimeHours > 12) {
+    recommendations.push('Improve response time to <12 hours for better buyer experience')
   }
 
   // Sales recommendations
   if (components.salesPerformance < 60) {
-    recommendations.push('Review pricing strategy - consider repricing rules to stay competitive')
+    recommendations.push('Review pricing strategy - Cassini favors competitive pricing')
     if (factors.ordersLast30Days < 20) {
-      recommendations.push('Add more listings to increase visibility and sales opportunities')
+      recommendations.push('Increase listing count to build sales velocity (Cassini signal)')
     }
   }
 
@@ -414,30 +755,35 @@ function generateRecommendations(
   if (factors.utilizationPercent > 85) {
     recommendations.push('Consider upgrading eBay store subscription for more listing capacity')
   } else if (factors.utilizationPercent < 30) {
-    recommendations.push('Store has significant capacity - increase listing count to maximize potential')
+    recommendations.push('Store has significant capacity - add listings to maximize Cassini momentum')
   }
 
   // Compliance recommendations
   if (components.complianceScore < 80) {
     if (factors.policyViolations > 0) {
-      recommendations.push('Address policy violations immediately to avoid account restrictions')
+      recommendations.push('Address policy violations immediately - causes Cassini penalties')
     }
     if (factors.veroWarnings > 0) {
-      recommendations.push('Review VeRO warnings and remove any infringing listings')
+      recommendations.push('Remove VeRO listings - violations severely impact Cassini visibility')
     }
   }
 
-  // Return empty if all good
+  // Return positive if all good
   if (recommendations.length === 0) {
-    recommendations.push('Store is performing well - maintain current practices')
+    if (cassiniStatus.projectedVisibility === 'high') {
+      recommendations.push('Excellent Cassini optimization - maintain current practices for maximum visibility')
+    } else {
+      recommendations.push('Store performing well - focus on sales velocity for Cassini momentum')
+    }
   }
 
-  return recommendations.slice(0, 5)  // Max 5 recommendations
+  return recommendations.slice(0, 6)  // Max 6 recommendations (increased for Cassini)
 }
 
 function calculateAllocationCapacity(
   factors: StoreHealthFactors,
-  overallScore: number
+  overallScore: number,
+  cassiniStatus: CassiniStoreStatus
 ): StoreHealthScore['allocationCapacity'] {
   const availableSlots = factors.maxListings - factors.currentListings
 
@@ -482,6 +828,35 @@ function calculateAllocationCapacity(
     optimalDaily = Math.floor(optimalDaily * 0.75)
   }
 
+  // CASSINI ADJUSTMENTS
+  // Top Rated stores can handle more listings (better visibility = better conversion)
+  if (cassiniStatus.isTopRated) {
+    maxNewListings = Math.floor(maxNewListings * 1.2)
+    optimalDaily = Math.floor(optimalDaily * 1.2)
+  }
+
+  // Top Rated Plus gets even more capacity
+  if (cassiniStatus.topRatedPlusEligible) {
+    maxNewListings = Math.floor(maxNewListings * 1.1)
+    optimalDaily = Math.floor(optimalDaily * 1.1)
+  }
+
+  // Suppressed stores should slow down to fix metrics
+  if (cassiniStatus.projectedVisibility === 'suppressed') {
+    maxNewListings = Math.floor(maxNewListings * 0.25)
+    optimalDaily = Math.floor(optimalDaily * 0.25)
+    riskLevel = 'high'
+  } else if (cassiniStatus.projectedVisibility === 'low') {
+    maxNewListings = Math.floor(maxNewListings * 0.5)
+    optimalDaily = Math.floor(optimalDaily * 0.5)
+  }
+
+  // High shipping risk should reduce allocation
+  if (cassiniStatus.shippingScore < 50) {
+    maxNewListings = Math.floor(maxNewListings * 0.7)
+    optimalDaily = Math.floor(optimalDaily * 0.7)
+  }
+
   return {
     maxNewListings: Math.max(0, maxNewListings),
     optimalDailyAdditions: Math.max(0, Math.round(optimalDaily)),
@@ -496,7 +871,12 @@ async function cacheHealthScore(storeId: string, score: StoreHealthScore): Promi
       health_score: score.overallScore,
       health_status: score.healthStatus,
       health_data: score,
-      health_calculated_at: score.lastCalculated
+      health_calculated_at: score.lastCalculated,
+      // Cassini-specific fields for quick access
+      cassini_visibility: score.cassiniStatus.projectedVisibility,
+      cassini_shipping_score: score.cassiniStatus.shippingScore,
+      cassini_readiness: score.components.cassiniReadiness,
+      is_top_rated_seller: score.cassiniStatus.isTopRated
     })
     .eq('id', storeId)
 }

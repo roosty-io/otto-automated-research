@@ -5,12 +5,19 @@
  * 1. ZIK Research → Find products with proven eBay demand
  * 2. Amazon Sourcing → Find supplier sources via Keepa
  * 3. Product Normalization → Clean and standardize data
- * 4. SKU Generation → Create listing-ready products
+ * 4. Cassini Optimization → Score and optimize for eBay visibility
+ * 5. SKU Generation → Create listing-ready products
+ *
+ * Cassini Integration:
+ * - Products are scored for Cassini visibility potential
+ * - High-visibility products are prioritized in the pipeline
+ * - Titles and item specifics are optimized for Cassini algorithm
  */
 
 import { createJob, getJobStats, type JobType } from '@/lib/jobs'
 import { rateLimiter } from '@/lib/automation/rate-limiter'
 import { supabase } from '@/lib/supabase'
+import { CASSINI_THRESHOLDS } from '@/lib/research/cassini-optimizer'
 
 export interface ResearchPipelineOptions {
   // ZIK search options
@@ -28,13 +35,22 @@ export interface ResearchPipelineOptions {
   autoNormalize?: boolean
   autoGenerateSkus?: boolean
 
+  // Cassini optimization options
+  cassiniOptimization?: {
+    enabled: boolean
+    minCassiniScore?: number          // Minimum Cassini score to proceed (0-100)
+    prioritizeByVisibility?: boolean  // Sort products by Cassini potential
+    optimizeTitles?: boolean          // Auto-optimize titles for Cassini
+    targetTopRatedPlus?: boolean      // Focus on products compatible with TRP sellers
+  }
+
   // User context
   userId?: string
   sessionId?: string
 }
 
 export interface PipelineProgress {
-  stage: 'queued' | 'researching' | 'sourcing' | 'normalizing' | 'generating' | 'complete' | 'error'
+  stage: 'queued' | 'researching' | 'sourcing' | 'normalizing' | 'cassini_optimizing' | 'generating' | 'complete' | 'error'
   progress: number // 0-100
   productsFound: number
   productsSourced: number
@@ -44,6 +60,16 @@ export interface PipelineProgress {
   jobIds: string[]
   startedAt: Date
   updatedAt: Date
+  // Cassini optimization metrics
+  cassiniMetrics?: {
+    productsScored: number
+    avgCassiniScore: number
+    highVisibilityProducts: number  // Score >= 70
+    mediumVisibilityProducts: number  // Score 50-69
+    lowVisibilityProducts: number  // Score < 50
+    titlesOptimized: number
+    productsFiltered: number  // Products below minimum score
+  }
 }
 
 export interface PipelineResult {
@@ -125,6 +151,12 @@ export async function startResearchPipeline(
         auto_source: true,
         auto_normalize: options.autoNormalize || false,
         auto_generate_skus: options.autoGenerateSkus || false,
+        // Cassini optimization configuration
+        cassini_enabled: options.cassiniOptimization?.enabled ?? true,
+        cassini_min_score: options.cassiniOptimization?.minCassiniScore ?? 50,
+        cassini_prioritize: options.cassiniOptimization?.prioritizeByVisibility ?? true,
+        cassini_optimize_titles: options.cassiniOptimization?.optimizeTitles ?? true,
+        cassini_target_trp: options.cassiniOptimization?.targetTopRatedPlus ?? false,
       })
     }
 
@@ -174,6 +206,7 @@ export async function getPipelineStatus(pipelineId: string): Promise<PipelinePro
     jobIds: data.job_ids || [],
     startedAt: new Date(data.started_at),
     updatedAt: new Date(data.updated_at),
+    cassiniMetrics: data.cassini_metrics || undefined,
   }
 }
 
@@ -207,6 +240,7 @@ async function savePipelineState(pipelineId: string, progress: PipelineProgress)
     job_ids: progress.jobIds,
     started_at: progress.startedAt.toISOString(),
     updated_at: progress.updatedAt.toISOString(),
+    cassini_metrics: progress.cassiniMetrics || null,
   })
 }
 
@@ -216,8 +250,8 @@ async function savePipelineState(pipelineId: string, progress: PipelineProgress)
  */
 export async function continuePipeline(
   pipelineId: string,
-  completedStage: 'research' | 'sourcing' | 'normalizing' | 'generating',
-  result: { productIds?: string[]; error?: string }
+  completedStage: 'research' | 'sourcing' | 'normalizing' | 'cassini_optimizing' | 'generating',
+  result: { productIds?: string[]; error?: string; cassiniMetrics?: PipelineProgress['cassiniMetrics'] }
 ): Promise<void> {
   const progress = await getPipelineStatus(pipelineId)
   if (!progress) return
@@ -238,7 +272,7 @@ export async function continuePipeline(
   switch (completedStage) {
     case 'research':
       progress.productsFound = result.productIds?.length || 0
-      progress.progress = 25
+      progress.progress = 20
 
       if (config?.auto_source && result.productIds?.length) {
         // Queue Amazon sourcing job
@@ -251,13 +285,13 @@ export async function continuePipeline(
         progress.stage = 'sourcing'
       } else {
         progress.stage = config?.auto_normalize ? 'normalizing' : 'complete'
-        progress.progress = config?.auto_normalize ? 50 : 100
+        progress.progress = config?.auto_normalize ? 40 : 100
       }
       break
 
     case 'sourcing':
       progress.productsSourced = result.productIds?.length || 0
-      progress.progress = 50
+      progress.progress = 40
 
       if (config?.auto_normalize && result.productIds?.length) {
         const normalizeJob = await createJob('normalize_products', {
@@ -267,19 +301,63 @@ export async function continuePipeline(
         progress.jobIds.push(normalizeJob.id)
         progress.stage = 'normalizing'
       } else {
-        progress.stage = config?.auto_generate_skus ? 'generating' : 'complete'
-        progress.progress = config?.auto_generate_skus ? 75 : 100
+        // Skip to Cassini optimization if enabled
+        const shouldOptimize = config?.cassini_enabled && result.productIds?.length
+        progress.stage = shouldOptimize ? 'cassini_optimizing' : (config?.auto_generate_skus ? 'generating' : 'complete')
+        progress.progress = shouldOptimize ? 60 : (config?.auto_generate_skus ? 80 : 100)
       }
       break
 
     case 'normalizing':
       progress.productsNormalized = result.productIds?.length || 0
-      progress.progress = 75
+      progress.progress = 60
 
-      if (config?.auto_generate_skus && result.productIds?.length) {
+      // Cassini optimization stage (NEW)
+      if (config?.cassini_enabled && result.productIds?.length) {
+        const cassiniJob = await createJob('cassini_optimize', {
+          pipelineId,
+          productIds: result.productIds,
+          minScore: config.cassini_min_score || 50,
+          optimizeTitles: config.cassini_optimize_titles ?? true,
+          prioritizeByVisibility: config.cassini_prioritize ?? true,
+          targetTopRatedPlus: config.cassini_target_trp ?? false,
+        })
+        progress.jobIds.push(cassiniJob.id)
+        progress.stage = 'cassini_optimizing'
+      } else if (config?.auto_generate_skus && result.productIds?.length) {
         const skuJob = await createJob('generate_skus', {
           pipelineId,
           productIds: result.productIds,
+        })
+        progress.jobIds.push(skuJob.id)
+        progress.stage = 'generating'
+        progress.progress = 80
+      } else {
+        progress.stage = 'complete'
+        progress.progress = 100
+      }
+      break
+
+    case 'cassini_optimizing':
+      // Update Cassini metrics from job result
+      if (result.cassiniMetrics) {
+        progress.cassiniMetrics = result.cassiniMetrics
+      }
+      progress.progress = 80
+
+      // Filter products based on Cassini score if configured
+      let productsForSkuGeneration = result.productIds || []
+      if (config?.cassini_min_score && result.cassiniMetrics) {
+        // Products that passed the minimum score filter
+        const passingCount = result.cassiniMetrics.productsScored - result.cassiniMetrics.productsFiltered
+        console.log(`[Pipeline ${pipelineId}] Cassini: ${passingCount}/${result.cassiniMetrics.productsScored} products passed minimum score ${config.cassini_min_score}`)
+      }
+
+      if (config?.auto_generate_skus && productsForSkuGeneration.length > 0) {
+        const skuJob = await createJob('generate_skus', {
+          pipelineId,
+          productIds: productsForSkuGeneration,
+          cassiniOptimized: true,  // Flag that these have been Cassini optimized
         })
         progress.jobIds.push(skuJob.id)
         progress.stage = 'generating'
@@ -371,16 +449,54 @@ export async function getPipelineStats(): Promise<{
   failed: number
   totalProducts: number
   totalSkus: number
+  cassiniStats: {
+    pipelinesWithCassini: number
+    avgCassiniScore: number
+    highVisibilityProducts: number
+    titlesOptimized: number
+  }
 }> {
   const { data } = await supabase
     .from('research_pipelines')
-    .select('stage, products_found, skus_generated')
+    .select('stage, products_found, skus_generated, cassini_metrics')
 
   if (!data) {
-    return { total: 0, running: 0, completed: 0, failed: 0, totalProducts: 0, totalSkus: 0 }
+    return {
+      total: 0,
+      running: 0,
+      completed: 0,
+      failed: 0,
+      totalProducts: 0,
+      totalSkus: 0,
+      cassiniStats: {
+        pipelinesWithCassini: 0,
+        avgCassiniScore: 0,
+        highVisibilityProducts: 0,
+        titlesOptimized: 0,
+      },
+    }
   }
 
-  const runningStages = ['queued', 'researching', 'sourcing', 'normalizing', 'generating']
+  const runningStages = ['queued', 'researching', 'sourcing', 'normalizing', 'cassini_optimizing', 'generating']
+
+  // Calculate Cassini-specific stats
+  const pipelinesWithCassini = data.filter((p) => p.cassini_metrics).length
+  let totalCassiniScore = 0
+  let totalHighVisibility = 0
+  let totalTitlesOptimized = 0
+  let cassiniCount = 0
+
+  for (const pipeline of data) {
+    if (pipeline.cassini_metrics) {
+      const metrics = pipeline.cassini_metrics as PipelineProgress['cassiniMetrics']
+      if (metrics) {
+        totalCassiniScore += metrics.avgCassiniScore || 0
+        totalHighVisibility += metrics.highVisibilityProducts || 0
+        totalTitlesOptimized += metrics.titlesOptimized || 0
+        cassiniCount++
+      }
+    }
+  }
 
   return {
     total: data.length,
@@ -389,5 +505,80 @@ export async function getPipelineStats(): Promise<{
     failed: data.filter((p) => p.stage === 'error').length,
     totalProducts: data.reduce((sum, p) => sum + (p.products_found || 0), 0),
     totalSkus: data.reduce((sum, p) => sum + (p.skus_generated || 0), 0),
+    cassiniStats: {
+      pipelinesWithCassini,
+      avgCassiniScore: cassiniCount > 0 ? Math.round(totalCassiniScore / cassiniCount) : 0,
+      highVisibilityProducts: totalHighVisibility,
+      titlesOptimized: totalTitlesOptimized,
+    },
   }
+}
+
+/**
+ * Get Cassini optimization recommendations for a pipeline
+ */
+export async function getCassiniPipelineRecommendations(pipelineId: string): Promise<string[]> {
+  const progress = await getPipelineStatus(pipelineId)
+  if (!progress || !progress.cassiniMetrics) {
+    return ['Run Cassini optimization to get visibility recommendations']
+  }
+
+  const recommendations: string[] = []
+  const metrics = progress.cassiniMetrics
+
+  // Analyze Cassini performance
+  if (metrics.avgCassiniScore < 50) {
+    recommendations.push('Average Cassini score is low. Review product selection for better visibility potential.')
+  }
+
+  if (metrics.lowVisibilityProducts > metrics.highVisibilityProducts) {
+    recommendations.push('More low-visibility products than high-visibility. Consider filtering by Cassini score.')
+  }
+
+  const filterRate = metrics.productsFiltered / metrics.productsScored
+  if (filterRate > 0.3) {
+    recommendations.push(`${Math.round(filterRate * 100)}% of products filtered due to low Cassini score. Adjust search criteria.`)
+  }
+
+  if (metrics.titlesOptimized < metrics.productsScored * 0.8) {
+    recommendations.push('Some product titles were not optimized. Run title optimization for remaining products.')
+  }
+
+  if (metrics.highVisibilityProducts > 0) {
+    recommendations.push(`${metrics.highVisibilityProducts} high-visibility products identified. Prioritize these for listing.`)
+  }
+
+  // Get pipeline config for TRP targeting
+  const { data: config } = await supabase
+    .from('pipeline_config')
+    .select('cassini_target_trp')
+    .eq('pipeline_id', pipelineId)
+    .single()
+
+  if (config?.cassini_target_trp) {
+    recommendations.push('TRP targeting enabled. Products are optimized for Top Rated Plus seller compatibility.')
+  }
+
+  return recommendations.length > 0 ? recommendations : ['Cassini optimization is performing well.']
+}
+
+/**
+ * Start a Cassini-optimized research pipeline with best practices
+ */
+export async function startCassiniOptimizedPipeline(
+  options: Omit<ResearchPipelineOptions, 'cassiniOptimization'>
+): Promise<PipelineResult> {
+  return startResearchPipeline({
+    ...options,
+    cassiniOptimization: {
+      enabled: true,
+      minCassiniScore: 60,  // Higher threshold for better visibility
+      prioritizeByVisibility: true,
+      optimizeTitles: true,
+      targetTopRatedPlus: true,  // Focus on TRP-compatible products
+    },
+    autoSourceFromAmazon: true,
+    autoNormalize: true,
+    autoGenerateSkus: true,
+  })
 }

@@ -6,11 +6,19 @@
  * - Returns/complaints
  * - Low profitability
  * - Supply chain issues
+ * - Cassini visibility penalties (NEW)
  *
  * Lower risk score = safer product
+ *
+ * Cassini Risk Factors:
+ * - Title spam terms that cause algorithm penalties
+ * - Slow shipping that hurts seller metrics
+ * - Low item specifics that reduce filter visibility
+ * - Pricing that affects conversion rates
  */
 
 import { supabase } from '../supabase'
+import { CASSINI_THRESHOLDS } from './cassini-optimizer'
 
 // =============================================================================
 // TYPES
@@ -34,6 +42,7 @@ export interface RiskAssessment {
     competition: RiskCategory
     seasonality: RiskCategory
     qualityIssues: RiskCategory
+    cassiniVisibility: RiskCategory  // NEW: Cassini algorithm risk factors
   }
 
   // Blockers (immediate disqualifiers)
@@ -120,6 +129,47 @@ const QUALITY_WARNING_TERMS = [
 ]
 
 // =============================================================================
+// CASSINI ALGORITHM RISK FACTORS
+// =============================================================================
+
+// Spam terms that Cassini algorithm penalizes
+const CASSINI_SPAM_TERMS = [
+  'l@@k', 'look', 'wow', 'amazing', 'best', 'cheap', 'sale',
+  '!!!', '***', 'must see', 'hot', 'rare find', 'great deal',
+  'limited time', 'act now', 'hurry', 'dont miss', "don't miss",
+  'last chance', 'ending soon', 'price drop', 'clearance',
+  'a+++', 'a++', 'a+', 'aaa', 'top quality', 'best quality',
+  'fast ship', 'ships fast', 'quick ship', 'free ship',
+  'u.s.a', 'usa seller', 'usa only', 'american made',
+]
+
+// Cassini optimal title characteristics
+const CASSINI_TITLE_REQUIREMENTS = {
+  minLength: 60,       // Below this, missing keyword opportunities
+  optimalMin: 75,      // Optimal range start
+  optimalMax: 80,      // Optimal range end
+  maxLength: 80,       // eBay limit
+  minKeywords: 5,      // Minimum relevant keywords
+}
+
+// Cassini item specifics requirements
+const CASSINI_ITEM_SPECIFICS = {
+  minimum: 5,          // Minimum for basic visibility
+  recommended: 8,      // Good visibility
+  optimal: 12,         // Maximum algorithm benefit
+}
+
+// Cassini shipping risk thresholds
+const CASSINI_SHIPPING_RISKS = {
+  maxHandlingDays: 1,          // Ideal for Top Rated Plus
+  warningHandlingDays: 2,      // Acceptable but not optimal
+  riskHandlingDays: 3,         // Risk to seller metrics
+  maxDeliveryDays: 7,          // Maximum for good standing
+  warningDeliveryDays: 10,     // Yellow flag
+  riskDeliveryDays: 14,        // Red flag
+}
+
+// =============================================================================
 // RISK ASSESSMENT
 // =============================================================================
 
@@ -141,6 +191,17 @@ export async function assessProductRisk(
       totalCompetitors?: number
       competitionLevel?: string
     }
+    // Cassini-specific data
+    cassiniData?: {
+      itemSpecificsCount?: number
+      handlingDays?: number
+      estimatedDeliveryDays?: number
+      hasTopRatedPlus?: boolean
+      sellerFeedbackScore?: number
+      defectRate?: number
+      lateShipmentRate?: number
+      titleKeywords?: string[]
+    }
   }
 ): Promise<RiskAssessment> {
   const risks: RiskAssessment['risks'] = {
@@ -152,6 +213,7 @@ export async function assessProductRisk(
     competition: assessCompetitionRisk(product),
     seasonality: assessSeasonalityRisk(product),
     qualityIssues: assessQualityRisk(product),
+    cassiniVisibility: assessCassiniVisibilityRisk(product),
   }
 
   // Calculate overall risk score (weighted average)
@@ -556,6 +618,271 @@ function assessQualityRisk(product: { title: string; description?: string }): Ri
 }
 
 // =============================================================================
+// CASSINI VISIBILITY RISK ASSESSMENT
+// =============================================================================
+
+function assessCassiniVisibilityRisk(product: {
+  title: string
+  description?: string
+  cassiniData?: {
+    itemSpecificsCount?: number
+    handlingDays?: number
+    estimatedDeliveryDays?: number
+    hasTopRatedPlus?: boolean
+    sellerFeedbackScore?: number
+    defectRate?: number
+    lateShipmentRate?: number
+    titleKeywords?: string[]
+  }
+}): RiskCategory {
+  const factors: RiskFactor[] = []
+  let score = 0
+  const titleLower = product.title.toLowerCase()
+  const data = product.cassiniData
+
+  // -------------------------------------------------------------------------
+  // Title Spam Term Detection
+  // -------------------------------------------------------------------------
+  const detectedSpamTerms: string[] = []
+  for (const term of CASSINI_SPAM_TERMS) {
+    if (titleLower.includes(term.toLowerCase())) {
+      detectedSpamTerms.push(term)
+    }
+  }
+
+  if (detectedSpamTerms.length > 0) {
+    const severity = detectedSpamTerms.length >= 3 ? 'high' :
+                     detectedSpamTerms.length >= 2 ? 'medium' : 'low'
+    factors.push({
+      name: 'title_spam_terms',
+      detected: true,
+      severity,
+      description: `Title contains Cassini-penalized terms: ${detectedSpamTerms.slice(0, 3).join(', ')}${detectedSpamTerms.length > 3 ? '...' : ''}`,
+      mitigation: 'Remove spam terms and use relevant product keywords instead',
+    })
+    score += detectedSpamTerms.length >= 3 ? 25 : detectedSpamTerms.length >= 2 ? 15 : 8
+  }
+
+  // -------------------------------------------------------------------------
+  // Title Length Analysis
+  // -------------------------------------------------------------------------
+  const titleLength = product.title.length
+
+  if (titleLength < CASSINI_TITLE_REQUIREMENTS.minLength) {
+    factors.push({
+      name: 'title_too_short',
+      detected: true,
+      severity: 'medium',
+      description: `Title length (${titleLength} chars) below optimal (${CASSINI_TITLE_REQUIREMENTS.optimalMin}-${CASSINI_TITLE_REQUIREMENTS.optimalMax})`,
+      mitigation: 'Add relevant keywords to reach 75-80 characters',
+    })
+    score += 15
+  } else if (titleLength > CASSINI_TITLE_REQUIREMENTS.maxLength) {
+    factors.push({
+      name: 'title_too_long',
+      detected: true,
+      severity: 'low',
+      description: `Title exceeds eBay limit (${titleLength}/${CASSINI_TITLE_REQUIREMENTS.maxLength} chars)`,
+      mitigation: 'Trim title to 80 characters, prioritizing keywords',
+    })
+    score += 5
+  } else if (titleLength < CASSINI_TITLE_REQUIREMENTS.optimalMin) {
+    factors.push({
+      name: 'title_suboptimal_length',
+      detected: true,
+      severity: 'low',
+      description: `Title length (${titleLength} chars) could be optimized (aim for ${CASSINI_TITLE_REQUIREMENTS.optimalMin}-${CASSINI_TITLE_REQUIREMENTS.optimalMax})`,
+      mitigation: 'Consider adding more relevant keywords',
+    })
+    score += 5
+  }
+
+  // -------------------------------------------------------------------------
+  // Keyword Front-Loading Check
+  // -------------------------------------------------------------------------
+  // Check if title starts with important keywords vs filler words
+  const fillerStarters = ['new', 'brand new', 'hot', 'sale', 'best', 'great', 'amazing', 'a', 'an', 'the']
+  const firstWord = titleLower.split(/\s+/)[0]
+
+  if (fillerStarters.includes(firstWord)) {
+    factors.push({
+      name: 'poor_keyword_placement',
+      detected: true,
+      severity: 'low',
+      description: `Title starts with filler word "${firstWord}" instead of primary keyword`,
+      mitigation: 'Front-load title with primary product keywords',
+    })
+    score += 8
+  }
+
+  // -------------------------------------------------------------------------
+  // Item Specifics Risk
+  // -------------------------------------------------------------------------
+  if (data?.itemSpecificsCount !== undefined) {
+    if (data.itemSpecificsCount < CASSINI_ITEM_SPECIFICS.minimum) {
+      factors.push({
+        name: 'insufficient_item_specifics',
+        detected: true,
+        severity: 'high',
+        description: `Only ${data.itemSpecificsCount} item specifics (minimum ${CASSINI_ITEM_SPECIFICS.minimum} for visibility)`,
+        mitigation: `Add at least ${CASSINI_ITEM_SPECIFICS.recommended} item specifics for better filter visibility`,
+      })
+      score += 25
+    } else if (data.itemSpecificsCount < CASSINI_ITEM_SPECIFICS.recommended) {
+      factors.push({
+        name: 'low_item_specifics',
+        detected: true,
+        severity: 'medium',
+        description: `${data.itemSpecificsCount} item specifics (recommend ${CASSINI_ITEM_SPECIFICS.recommended}+)`,
+        mitigation: `Add more item specifics to reach ${CASSINI_ITEM_SPECIFICS.optimal} for optimal visibility`,
+      })
+      score += 12
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Shipping/Handling Risk (affects seller metrics → Cassini ranking)
+  // -------------------------------------------------------------------------
+  if (data?.handlingDays !== undefined) {
+    if (data.handlingDays > CASSINI_SHIPPING_RISKS.riskHandlingDays) {
+      factors.push({
+        name: 'slow_handling',
+        detected: true,
+        severity: 'high',
+        description: `${data.handlingDays}-day handling time risks seller metrics`,
+        mitigation: 'Use supplier with same-day or 1-day handling for Top Rated Plus eligibility',
+      })
+      score += 20
+    } else if (data.handlingDays > CASSINI_SHIPPING_RISKS.warningHandlingDays) {
+      factors.push({
+        name: 'suboptimal_handling',
+        detected: true,
+        severity: 'medium',
+        description: `${data.handlingDays}-day handling - not eligible for Top Rated Plus`,
+        mitigation: 'Consider suppliers with faster handling times',
+      })
+      score += 10
+    }
+  }
+
+  if (data?.estimatedDeliveryDays !== undefined) {
+    if (data.estimatedDeliveryDays > CASSINI_SHIPPING_RISKS.riskDeliveryDays) {
+      factors.push({
+        name: 'excessive_delivery_time',
+        detected: true,
+        severity: 'high',
+        description: `${data.estimatedDeliveryDays}-day delivery puts seller metrics at risk`,
+        mitigation: 'Find suppliers with faster shipping options',
+      })
+      score += 20
+    } else if (data.estimatedDeliveryDays > CASSINI_SHIPPING_RISKS.maxDeliveryDays) {
+      factors.push({
+        name: 'slow_delivery',
+        detected: true,
+        severity: 'medium',
+        description: `${data.estimatedDeliveryDays}-day delivery exceeds recommended maximum`,
+        mitigation: 'Aim for 7-day or faster delivery',
+      })
+      score += 12
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Seller Metrics Risk (directly affects Cassini visibility)
+  // -------------------------------------------------------------------------
+  if (data?.defectRate !== undefined) {
+    if (data.defectRate > CASSINI_THRESHOLDS.defectRate.belowStandard) {
+      factors.push({
+        name: 'high_defect_rate_risk',
+        detected: true,
+        severity: 'critical',
+        description: `Product may push defect rate above ${CASSINI_THRESHOLDS.defectRate.belowStandard}%`,
+        mitigation: 'Avoid listings that may increase defect rate',
+      })
+      score += 35
+    } else if (data.defectRate > CASSINI_THRESHOLDS.defectRate.topRated) {
+      factors.push({
+        name: 'moderate_defect_risk',
+        detected: true,
+        severity: 'medium',
+        description: `Defect rate ${data.defectRate}% above Top Rated threshold`,
+        mitigation: 'Monitor product quality closely',
+      })
+      score += 15
+    }
+  }
+
+  if (data?.lateShipmentRate !== undefined) {
+    if (data.lateShipmentRate > CASSINI_THRESHOLDS.lateShipmentRate.belowStandard) {
+      factors.push({
+        name: 'high_late_shipment_risk',
+        detected: true,
+        severity: 'critical',
+        description: `Late shipment rate ${data.lateShipmentRate}% threatens seller standing`,
+        mitigation: 'Only list products with reliable, fast shipping suppliers',
+      })
+      score += 30
+    } else if (data.lateShipmentRate > CASSINI_THRESHOLDS.lateShipmentRate.topRated) {
+      factors.push({
+        name: 'moderate_late_shipment_risk',
+        detected: true,
+        severity: 'medium',
+        description: `Late shipment rate ${data.lateShipmentRate}% above Top Rated threshold`,
+        mitigation: 'Use suppliers with consistent handling times',
+      })
+      score += 12
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Top Rated Plus Eligibility Impact
+  // -------------------------------------------------------------------------
+  if (data?.hasTopRatedPlus === false) {
+    // Not having Top Rated Plus means missing 20% visibility boost
+    factors.push({
+      name: 'no_top_rated_plus',
+      detected: true,
+      severity: 'info',
+      description: 'Not eligible for Top Rated Plus (+20% visibility)',
+      mitigation: 'Meet TRP requirements: 1-day handling + free 30-day returns',
+    })
+    score += 5
+  }
+
+  // -------------------------------------------------------------------------
+  // Seller Feedback Score Risk
+  // -------------------------------------------------------------------------
+  if (data?.sellerFeedbackScore !== undefined) {
+    if (data.sellerFeedbackScore < CASSINI_THRESHOLDS.feedbackScore.acceptable) {
+      factors.push({
+        name: 'low_feedback_score',
+        detected: true,
+        severity: 'high',
+        description: `Feedback score ${data.sellerFeedbackScore}% below acceptable threshold`,
+        mitigation: 'Focus on customer service to improve feedback score',
+      })
+      score += 20
+    } else if (data.sellerFeedbackScore < CASSINI_THRESHOLDS.feedbackScore.good) {
+      factors.push({
+        name: 'moderate_feedback_score',
+        detected: true,
+        severity: 'medium',
+        description: `Feedback score ${data.sellerFeedbackScore}% below good threshold`,
+        mitigation: 'Improve feedback score for better visibility',
+      })
+      score += 10
+    }
+  }
+
+  return {
+    name: 'Cassini Visibility',
+    score: Math.min(100, score),
+    weight: 0.15,  // Significant weight for Cassini factors
+    factors,
+  }
+}
+
+// =============================================================================
 // MITIGATIONS
 // =============================================================================
 
@@ -596,6 +923,42 @@ function generateMitigations(
   // Seasonality
   if (risks.seasonality.score > 15) {
     mitigations.push('Plan inventory levels around seasonal demand')
+  }
+
+  // Cassini Visibility - NEW
+  if (risks.cassiniVisibility.score > 25) {
+    mitigations.push('Optimize title: 75-80 chars, front-load keywords, remove spam terms')
+  }
+
+  if (risks.cassiniVisibility.score > 15) {
+    mitigations.push('Add 8-12 item specifics for filter visibility')
+  }
+
+  // Check for specific Cassini factors
+  const cassiniFactors = risks.cassiniVisibility.factors
+
+  const hasShippingIssue = cassiniFactors.some(f =>
+    f.detected && (f.name === 'slow_handling' || f.name === 'excessive_delivery_time')
+  )
+  if (hasShippingIssue) {
+    mitigations.push('Find faster shipping supplier to protect seller metrics')
+  }
+
+  const hasSellerMetricRisk = cassiniFactors.some(f =>
+    f.detected && (f.name.includes('defect') || f.name.includes('late_shipment'))
+  )
+  if (hasSellerMetricRisk) {
+    mitigations.push('Monitor seller metrics closely - product may impact standing')
+  }
+
+  const hasSpamTerms = cassiniFactors.some(f => f.detected && f.name === 'title_spam_terms')
+  if (hasSpamTerms) {
+    mitigations.push('Remove spam terms from title to avoid Cassini penalties')
+  }
+
+  const noTopRatedPlus = cassiniFactors.some(f => f.detected && f.name === 'no_top_rated_plus')
+  if (noTopRatedPlus && risks.cassiniVisibility.score > 10) {
+    mitigations.push('Consider Top Rated Plus eligibility for +20% visibility boost')
   }
 
   return mitigations

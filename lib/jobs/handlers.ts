@@ -548,3 +548,480 @@ function calculateSellPrice(costPrice: number): number {
   // Round to .99
   return Math.ceil(withFees) - 0.01
 }
+
+// =============================================================================
+// CASSINI OPTIMIZATION JOB HANDLERS
+// =============================================================================
+
+/**
+ * Cassini Optimize Job Handler
+ *
+ * Scores and optimizes products for eBay Cassini algorithm visibility.
+ *
+ * Payload:
+ * {
+ *   productIds: string[],
+ *   minScore?: number,
+ *   optimizeTitles?: boolean,
+ *   prioritizeByVisibility?: boolean,
+ *   targetTopRatedPlus?: boolean,
+ *   pipelineId?: string
+ * }
+ */
+registerJobHandler('cassini_optimize', async (job: Job): Promise<JobResult> => {
+  const {
+    productIds,
+    minScore = 50,
+    optimizeTitles = true,
+    prioritizeByVisibility = true,
+    targetTopRatedPlus = false,
+    pipelineId,
+  } = job.payload
+
+  if (!productIds || productIds.length === 0) {
+    if (pipelineId) {
+      await continuePipeline(pipelineId, 'cassini_optimizing', { productIds: [] })
+    }
+    return { success: false, error: 'No product IDs provided' }
+  }
+
+  // Get products to optimize
+  const { data: products, error } = await supabase
+    .from('normalized_products')
+    .select('*')
+    .in('id', productIds)
+
+  if (error || !products || products.length === 0) {
+    if (pipelineId) {
+      await continuePipeline(pipelineId, 'cassini_optimizing', { productIds: [] })
+    }
+    return { success: false, error: 'No products found' }
+  }
+
+  // Track metrics
+  const metrics = {
+    productsScored: 0,
+    avgCassiniScore: 0,
+    highVisibilityProducts: 0,
+    mediumVisibilityProducts: 0,
+    lowVisibilityProducts: 0,
+    titlesOptimized: 0,
+    productsFiltered: 0,
+  }
+
+  const optimizedProductIds: string[] = []
+  const cassiniScores: number[] = []
+
+  for (const product of products) {
+    try {
+      // Calculate Cassini visibility score
+      const cassiniScore = calculateCassiniScore(product, targetTopRatedPlus)
+      metrics.productsScored++
+      cassiniScores.push(cassiniScore)
+
+      // Categorize by visibility
+      if (cassiniScore >= 70) {
+        metrics.highVisibilityProducts++
+      } else if (cassiniScore >= 50) {
+        metrics.mediumVisibilityProducts++
+      } else {
+        metrics.lowVisibilityProducts++
+      }
+
+      // Filter by minimum score
+      if (cassiniScore < minScore) {
+        metrics.productsFiltered++
+        continue
+      }
+
+      // Optimize title if enabled
+      let optimizedTitle = product.normalized_title
+      if (optimizeTitles) {
+        optimizedTitle = optimizeTitleForCassini(product.normalized_title)
+        if (optimizedTitle !== product.normalized_title) {
+          metrics.titlesOptimized++
+        }
+      }
+
+      // Update product with Cassini data
+      await supabase
+        .from('normalized_products')
+        .update({
+          cassini_score: cassiniScore,
+          cassini_optimized_title: optimizedTitle,
+          cassini_optimized_at: new Date().toISOString(),
+        })
+        .eq('id', product.id)
+
+      optimizedProductIds.push(product.id)
+    } catch (err) {
+      console.error(`Error optimizing product ${product.id}:`, err)
+    }
+  }
+
+  // Calculate average score
+  if (cassiniScores.length > 0) {
+    metrics.avgCassiniScore = Math.round(
+      cassiniScores.reduce((a, b) => a + b, 0) / cassiniScores.length
+    )
+  }
+
+  // Sort by visibility if enabled
+  if (prioritizeByVisibility) {
+    // Sort in database query would be more efficient for large sets
+    // For now, the consumer can sort by cassini_score
+  }
+
+  // Continue pipeline if this is part of one
+  if (pipelineId) {
+    await continuePipeline(pipelineId, 'cassini_optimizing', {
+      productIds: optimizedProductIds,
+      cassiniMetrics: metrics,
+    })
+  }
+
+  return {
+    success: true,
+    data: {
+      processed: metrics.productsScored,
+      optimized: optimizedProductIds.length,
+      filtered: metrics.productsFiltered,
+      metrics,
+      productIds: optimizedProductIds,
+    },
+  }
+})
+
+/**
+ * New Listing Boost Job Handler
+ *
+ * Manages the 48-hour new listing visibility boost window.
+ * Staggers listings across stores to maximize boost coverage.
+ *
+ * Payload:
+ * {
+ *   storeGroupId?: string,
+ *   storeIds?: string[],
+ *   listingsPerStore?: number,
+ *   staggerMinutes?: number
+ * }
+ */
+registerJobHandler('new_listing_boost', async (job: Job): Promise<JobResult> => {
+  const {
+    storeGroupId,
+    storeIds,
+    listingsPerStore = 5,
+    staggerMinutes = 30,
+  } = job.payload
+
+  // Get stores to optimize
+  let stores: any[] = []
+
+  if (storeGroupId) {
+    const { data: group } = await supabase
+      .from('store_groups')
+      .select('store_ids')
+      .eq('id', storeGroupId)
+      .single()
+
+    if (group?.store_ids) {
+      const { data } = await supabase
+        .from('stores')
+        .select('id, store_name, health_data')
+        .in('id', group.store_ids)
+        .eq('is_active', true)
+
+      stores = data || []
+    }
+  } else if (storeIds) {
+    const { data } = await supabase
+      .from('stores')
+      .select('id, store_name, health_data')
+      .in('id', storeIds)
+      .eq('is_active', true)
+
+    stores = data || []
+  }
+
+  if (stores.length === 0) {
+    return { success: false, error: 'No active stores found' }
+  }
+
+  // Get pending SKUs that need listing
+  const { data: pendingAssignments } = await supabase
+    .from('store_sku_assignments')
+    .select('id, store_id, sku_id')
+    .eq('listing_status', 'pending')
+    .in('store_id', stores.map((s) => s.id))
+    .limit(stores.length * listingsPerStore)
+
+  if (!pendingAssignments || pendingAssignments.length === 0) {
+    return {
+      success: true,
+      data: { message: 'No pending assignments to boost' },
+    }
+  }
+
+  // Group by store
+  const byStore = new Map<string, typeof pendingAssignments>()
+  for (const assignment of pendingAssignments) {
+    if (!byStore.has(assignment.store_id)) {
+      byStore.set(assignment.store_id, [])
+    }
+    byStore.get(assignment.store_id)!.push(assignment)
+  }
+
+  // Schedule staggered listings for each store
+  const scheduledCount = 0
+  let scheduleOffset = 0
+
+  for (const [storeId, assignments] of byStore) {
+    const limitedAssignments = assignments.slice(0, listingsPerStore)
+
+    for (const assignment of limitedAssignments) {
+      // Schedule the listing with stagger
+      const scheduledTime = new Date(Date.now() + scheduleOffset * 60 * 1000)
+
+      await supabase
+        .from('store_sku_assignments')
+        .update({
+          listing_status: 'scheduled',
+          scheduled_at: scheduledTime.toISOString(),
+          boost_window_starts: scheduledTime.toISOString(),
+          boost_window_ends: new Date(scheduledTime.getTime() + 48 * 60 * 60 * 1000).toISOString(),
+        })
+        .eq('id', assignment.id)
+
+      scheduleOffset += staggerMinutes
+    }
+  }
+
+  return {
+    success: true,
+    data: {
+      storesProcessed: byStore.size,
+      listingsScheduled: pendingAssignments.length,
+      staggerIntervalMinutes: staggerMinutes,
+      estimatedCompletionTime: new Date(Date.now() + scheduleOffset * 60 * 1000).toISOString(),
+    },
+  }
+})
+
+/**
+ * Cassini Reprice Job Handler
+ *
+ * Reprices listings with Cassini visibility factors in mind.
+ * Accounts for seller status, visibility boost, and competition.
+ *
+ * Payload:
+ * {
+ *   assignmentIds?: string[],
+ *   storeId?: string,
+ *   adjustForVisibility?: boolean,
+ *   maxPriceChange?: number
+ * }
+ */
+registerJobHandler('cassini_reprice', async (job: Job): Promise<JobResult> => {
+  const {
+    assignmentIds,
+    storeId,
+    adjustForVisibility = true,
+    maxPriceChange = 10, // Max % change per adjustment
+  } = job.payload
+
+  // Get assignments to reprice
+  let query = supabase
+    .from('store_sku_assignments')
+    .select(`
+      id, current_price, store_id, sku_id,
+      sku:skus(id, sell_price, normalized_product:normalized_products(cassini_score)),
+      store:stores(id, health_data)
+    `)
+    .eq('listing_status', 'active')
+
+  if (assignmentIds) {
+    query = query.in('id', assignmentIds)
+  } else if (storeId) {
+    query = query.eq('store_id', storeId)
+  }
+
+  query = query.limit(100)
+
+  const { data: assignments, error } = await query
+
+  if (error || !assignments || assignments.length === 0) {
+    return {
+      success: true,
+      data: { message: 'No assignments to reprice' },
+    }
+  }
+
+  let repricedCount = 0
+  let priceIncreasedCount = 0
+  let priceDecreasedCount = 0
+  let unchangedCount = 0
+
+  for (const assignment of assignments) {
+    try {
+      const currentPrice = assignment.current_price
+      const basePrice = assignment.sku?.sell_price || currentPrice
+      const cassiniScore = assignment.sku?.normalized_product?.cassini_score || 50
+      const storeHealth = assignment.store?.health_data as any
+
+      // Calculate visibility adjustment
+      let visibilityMultiplier = 1.0
+
+      if (adjustForVisibility) {
+        // Top Rated Plus: can charge 3-5% more
+        if (storeHealth?.cassiniStatus?.isTopRatedPlus) {
+          visibilityMultiplier += 0.04
+        } else if (storeHealth?.cassiniStatus?.isTopRatedSeller) {
+          // Top Rated: can charge 2-3% more
+          visibilityMultiplier += 0.025
+        }
+
+        // High Cassini score product: can maintain higher price
+        if (cassiniScore >= 80) {
+          visibilityMultiplier += 0.02
+        } else if (cassiniScore < 50) {
+          // Low Cassini score: may need lower price
+          visibilityMultiplier -= 0.02
+        }
+
+        // New listing boost active: can be slightly aggressive
+        const boostEnds = assignment.boost_window_ends
+        if (boostEnds && new Date(boostEnds) > new Date()) {
+          visibilityMultiplier += 0.015
+        }
+      }
+
+      // Calculate new price
+      let newPrice = basePrice * visibilityMultiplier
+
+      // Enforce max price change
+      const maxChange = currentPrice * (maxPriceChange / 100)
+      if (Math.abs(newPrice - currentPrice) > maxChange) {
+        newPrice = newPrice > currentPrice
+          ? currentPrice + maxChange
+          : currentPrice - maxChange
+      }
+
+      // Round to .99
+      newPrice = Math.ceil(newPrice) - 0.01
+
+      // Skip if no meaningful change
+      if (Math.abs(newPrice - currentPrice) < 0.5) {
+        unchangedCount++
+        continue
+      }
+
+      // Update price
+      await supabase
+        .from('store_sku_assignments')
+        .update({
+          current_price: newPrice,
+          price_updated_at: new Date().toISOString(),
+          cassini_price_adjustment: visibilityMultiplier,
+        })
+        .eq('id', assignment.id)
+
+      repricedCount++
+      if (newPrice > currentPrice) {
+        priceIncreasedCount++
+      } else {
+        priceDecreasedCount++
+      }
+    } catch (err) {
+      console.error(`Error repricing assignment ${assignment.id}:`, err)
+    }
+  }
+
+  return {
+    success: true,
+    data: {
+      processed: assignments.length,
+      repriced: repricedCount,
+      increased: priceIncreasedCount,
+      decreased: priceDecreasedCount,
+      unchanged: unchangedCount,
+    },
+  }
+})
+
+// =============================================================================
+// CASSINI HELPER FUNCTIONS
+// =============================================================================
+
+function calculateCassiniScore(product: any, targetTopRatedPlus: boolean): number {
+  let score = 50 // Base score
+
+  const title = product.normalized_title || ''
+
+  // Title optimization factors
+  const titleLength = title.length
+  if (titleLength >= 75 && titleLength <= 80) {
+    score += 15 // Optimal length
+  } else if (titleLength >= 60 && titleLength < 75) {
+    score += 8
+  } else if (titleLength < 40) {
+    score -= 10 // Too short
+  }
+
+  // Spam term penalties
+  const spamTerms = ['l@@k', 'wow', 'amazing', 'best', 'cheap', '!!!', '***']
+  const titleLower = title.toLowerCase()
+  for (const term of spamTerms) {
+    if (titleLower.includes(term)) {
+      score -= 8
+    }
+  }
+
+  // Quality signals
+  if (product.quality_score) {
+    score += Math.round(product.quality_score * 0.2)
+  }
+
+  // Brand recognition
+  if (product.normalized_brand && product.normalized_brand !== 'Unbranded') {
+    score += 5
+  }
+
+  // If targeting TRP, penalize products that may have shipping issues
+  if (targetTopRatedPlus) {
+    // Heavy items may have shipping delays
+    if (titleLower.includes('heavy') || titleLower.includes('large') || titleLower.includes('oversized')) {
+      score -= 5
+    }
+  }
+
+  return Math.max(0, Math.min(100, score))
+}
+
+function optimizeTitleForCassini(title: string): string {
+  // Remove spam terms
+  const spamTerms = ['l@@k', 'look!', 'wow!', 'amazing!', 'best!', 'cheap!', '!!!', '***', '~', '**']
+  let optimized = title
+
+  for (const term of spamTerms) {
+    optimized = optimized.replace(new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '')
+  }
+
+  // Clean up extra spaces
+  optimized = optimized.replace(/\s+/g, ' ').trim()
+
+  // Ensure proper capitalization (title case for first letter of each word)
+  optimized = optimized
+    .split(' ')
+    .map((word) => {
+      if (word.length <= 2) return word.toLowerCase()
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+    })
+    .join(' ')
+
+  // Truncate to 80 characters (Cassini optimal)
+  if (optimized.length > 80) {
+    optimized = optimized.substring(0, 77) + '...'
+  }
+
+  return optimized
+}

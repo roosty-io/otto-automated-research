@@ -1,10 +1,12 @@
 // OTTO Research Labs - Multi-Store Management System
 // Designed for managing 75+ stores under a single managed service account
 // Optimized for fleet-wide operations, cross-store analytics, and intelligent load balancing
+// Enhanced with Cassini algorithm optimization for maximum visibility
 
 import { createClient } from '@supabase/supabase-js'
-import { calculateStoreHealth, StoreHealthScore, createAllocationPlan } from './health-scoring'
+import { calculateStoreHealth, StoreHealthScore, createAllocationPlan, CassiniStoreStatus } from './health-scoring'
 import { batchInsert, batchUpdateByIds } from '../database/batch-operations'
+import { CASSINI_THRESHOLDS } from '../research/cassini-optimizer'
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -47,7 +49,7 @@ export interface StoreGroupSettings {
   healthCheckFrequencyHours: number
 
   // Load Balancing
-  loadBalancingStrategy: 'even' | 'weighted' | 'capacity' | 'performance'
+  loadBalancingStrategy: 'even' | 'weighted' | 'capacity' | 'performance' | 'cassini'
   rebalanceEnabled: boolean
   rebalanceThresholdPercent: number
 
@@ -55,6 +57,13 @@ export interface StoreGroupSettings {
   maxDefectRate: number
   maxLateShipmentRate: number
   complianceCheckEnabled: boolean
+
+  // Cassini Optimization Settings (NEW)
+  cassiniOptimizationEnabled: boolean
+  minCassiniReadinessScore: number        // 0-100, minimum for allocation
+  prioritizeTopRatedPlus: boolean         // Prefer stores with TRP eligibility
+  newListingBoostStrategy: 'spread' | 'concentrate'  // How to leverage 48h boost
+  cassiniRebalanceEnabled: boolean        // Rebalance based on Cassini scores
 }
 
 export interface FleetOverview {
@@ -85,6 +94,15 @@ export interface FleetMetrics {
   capacityUtilization: number
   topPerformers: Array<{ storeId: string; storeName: string; revenue: number }>
   underperformers: Array<{ storeId: string; storeName: string; issues: string[] }>
+  // Cassini-specific metrics (NEW)
+  cassiniMetrics: {
+    avgCassiniReadiness: number           // Fleet-wide Cassini readiness (0-100)
+    topRatedPlusStores: number            // Count of TRP eligible stores
+    topRatedStores: number                // Count of TR eligible stores
+    avgVisibilityBoost: number            // Estimated average visibility boost %
+    storesWithNewListingBoost: number     // Stores with active 48h boost
+    cassiniOptimizedListings: number      // Listings meeting Cassini best practices
+  }
 }
 
 export interface FleetAlert {
@@ -145,12 +163,18 @@ export async function createStoreGroup(
     minHealthScore: 50,
     autoDisableUnhealthyStores: true,
     healthCheckFrequencyHours: 6,
-    loadBalancingStrategy: 'weighted',
+    loadBalancingStrategy: 'cassini',  // Default to Cassini-optimized allocation
     rebalanceEnabled: true,
     rebalanceThresholdPercent: 20,
     maxDefectRate: 2.0,
     maxLateShipmentRate: 7.0,
     complianceCheckEnabled: true,
+    // Cassini optimization defaults
+    cassiniOptimizationEnabled: true,
+    minCassiniReadinessScore: 60,
+    prioritizeTopRatedPlus: true,
+    newListingBoostStrategy: 'spread',
+    cassiniRebalanceEnabled: true,
     ...settings
   }
 
@@ -303,7 +327,15 @@ export async function getFleetOverview(
         avgFeedbackScore: 0,
         capacityUtilization: 0,
         topPerformers: [],
-        underperformers: []
+        underperformers: [],
+        cassiniMetrics: {
+          avgCassiniReadiness: 0,
+          topRatedPlusStores: 0,
+          topRatedStores: 0,
+          avgVisibilityBoost: 0,
+          storesWithNewListingBoost: 0,
+          cassiniOptimizedListings: 0
+        }
       },
       alerts: []
     }
@@ -321,6 +353,14 @@ export async function getFleetOverview(
   let totalDefectRate = 0
   let totalLateShipmentRate = 0
   let totalFeedbackScore = 0
+
+  // Cassini metrics tracking
+  let totalCassiniReadiness = 0
+  let cassiniReadinessCount = 0
+  let topRatedPlusStores = 0
+  let topRatedStores = 0
+  let storesWithNewListingBoost = 0
+  let cassiniOptimizedListings = 0
 
   const healthDistribution = { excellent: 0, good: 0, fair: 0, poor: 0, critical: 0 }
   const storePerformance: Array<{ storeId: string; storeName: string; revenue: number; issues: string[] }> = []
@@ -359,12 +399,33 @@ export async function getFleetOverview(
       totalFeedbackScore += healthData.factors.feedbackScore
     }
 
+    // Cassini metrics aggregation
+    const cassiniData = healthData as any
+    if (cassiniData?.cassiniStatus) {
+      const cassiniStatus = cassiniData.cassiniStatus as CassiniStoreStatus
+      if (cassiniStatus.cassiniReadinessScore !== undefined) {
+        totalCassiniReadiness += cassiniStatus.cassiniReadinessScore
+        cassiniReadinessCount++
+      }
+      if (cassiniStatus.isTopRatedPlus) topRatedPlusStores++
+      if (cassiniStatus.isTopRatedSeller) topRatedStores++
+      if (cassiniStatus.hasNewListingBoost) storesWithNewListingBoost++
+      cassiniOptimizedListings += cassiniStatus.cassiniOptimizedListings || 0
+    }
+
     // Track performance for top/under performers
     const issues: string[] = []
     if (healthData?.factors) {
       if (healthData.factors.defectRate > 2) issues.push('High defect rate')
       if (healthData.factors.lateShipmentRate > 7) issues.push('High late shipment rate')
       if (healthData.factors.feedbackScore < 95) issues.push('Low feedback score')
+    }
+
+    // Add Cassini-specific issues
+    if (cassiniData?.cassiniStatus) {
+      const cassiniStatus = cassiniData.cassiniStatus as CassiniStoreStatus
+      if (cassiniStatus.cassiniReadinessScore < 50) issues.push('Low Cassini readiness')
+      if (!cassiniStatus.isTopRatedSeller) issues.push('Not Top Rated Seller')
     }
 
     storePerformance.push({
@@ -390,6 +451,14 @@ export async function getFleetOverview(
   // Get alerts
   const alerts = await getFleetAlerts(userId, groupId)
 
+  // Calculate average visibility boost based on seller status
+  let avgVisibilityBoost = 0
+  if (stores.length > 0) {
+    // Top Rated Plus: +20%, Top Rated: +15%, Standard: 0%
+    const totalBoost = topRatedPlusStores * 20 + (topRatedStores - topRatedPlusStores) * 15
+    avgVisibilityBoost = Math.round(totalBoost / stores.length * 10) / 10
+  }
+
   return {
     totalStores: stores.length,
     activeStores: stores.filter(s => s.is_active && s.status !== 'paused').length,
@@ -407,7 +476,15 @@ export async function getFleetOverview(
       avgFeedbackScore: stores.length > 0 ? Math.round((totalFeedbackScore / stores.length) * 10) / 10 : 0,
       capacityUtilization: 0, // Calculate from max listings
       topPerformers,
-      underperformers
+      underperformers,
+      cassiniMetrics: {
+        avgCassiniReadiness: cassiniReadinessCount > 0 ? Math.round(totalCassiniReadiness / cassiniReadinessCount) : 0,
+        topRatedPlusStores,
+        topRatedStores,
+        avgVisibilityBoost,
+        storesWithNewListingBoost,
+        cassiniOptimizedListings
+      }
     },
     alerts
   }
@@ -529,7 +606,7 @@ export async function bulkRecalculateHealth(
 export async function bulkAssignSkus(
   skuIds: string[],
   groupId: string,
-  strategy: 'even' | 'weighted' | 'capacity' = 'weighted'
+  strategy: 'even' | 'weighted' | 'capacity' | 'cassini' = 'cassini'
 ): Promise<BulkOperationResult> {
   const results: BulkOperationResult['results'] = []
 
@@ -626,6 +703,147 @@ export async function bulkAssignSkus(
       })
       skuIndex++
       storeIdx++
+    }
+  } else if (strategy === 'cassini') {
+    // CASSINI-OPTIMIZED ALLOCATION
+    // Prioritizes stores with best Cassini visibility factors:
+    // 1. Top Rated Plus eligible stores (+20% visibility)
+    // 2. Top Rated Seller stores (+15% visibility)
+    // 3. Stores with best seller metrics (defect rate, late shipment, feedback)
+    // 4. Spread new listings for 48-hour boost optimization
+
+    const settings = group.settings as StoreGroupSettings | null
+
+    // Score each store based on Cassini factors
+    const storesWithCassiniScore = stores.map(store => {
+      const healthData = store.health_data as any
+      const cassiniStatus = healthData?.cassiniStatus as CassiniStoreStatus | undefined
+      const factors = healthData?.factors
+
+      let cassiniScore = 0
+
+      // Top Rated Plus: +40 points (best visibility)
+      if (cassiniStatus?.isTopRatedPlus) {
+        cassiniScore += 40
+      } else if (cassiniStatus?.isTopRatedSeller) {
+        // Top Rated Seller: +25 points
+        cassiniScore += 25
+      }
+
+      // Cassini readiness score: up to +30 points
+      if (cassiniStatus?.cassiniReadinessScore) {
+        cassiniScore += Math.round(cassiniStatus.cassiniReadinessScore * 0.3)
+      }
+
+      // Seller metrics bonus (lower is better)
+      if (factors) {
+        // Good defect rate: up to +10 points
+        if (factors.defectRate <= CASSINI_THRESHOLDS.defectRate.topRated) {
+          cassiniScore += 10
+        } else if (factors.defectRate <= CASSINI_THRESHOLDS.defectRate.aboveStandard) {
+          cassiniScore += 5
+        }
+
+        // Good late shipment rate: up to +10 points
+        if (factors.lateShipmentRate <= CASSINI_THRESHOLDS.lateShipmentRate.topRated) {
+          cassiniScore += 10
+        } else if (factors.lateShipmentRate <= CASSINI_THRESHOLDS.lateShipmentRate.aboveStandard) {
+          cassiniScore += 5
+        }
+
+        // Feedback score: up to +10 points
+        if (factors.feedbackScore >= CASSINI_THRESHOLDS.feedbackScore.excellent) {
+          cassiniScore += 10
+        } else if (factors.feedbackScore >= CASSINI_THRESHOLDS.feedbackScore.good) {
+          cassiniScore += 5
+        }
+      }
+
+      // New listing boost potential: if store has room for boost optimization
+      const activeListings = store.store_sku_assignments?.length || 0
+      if (cassiniStatus?.hasNewListingBoost === false && activeListings < 500) {
+        cassiniScore += 5 // Potential for new listing visibility
+      }
+
+      return {
+        store,
+        cassiniScore,
+        activeListings
+      }
+    })
+
+    // Sort by Cassini score (highest first)
+    const sortedStores = storesWithCassiniScore
+      .filter(s => {
+        // Apply minimum Cassini readiness filter if configured
+        if (settings?.minCassiniReadinessScore) {
+          const healthData = s.store.health_data as any
+          const readiness = healthData?.cassiniStatus?.cassiniReadinessScore || 0
+          return readiness >= settings.minCassiniReadinessScore
+        }
+        return true
+      })
+      .sort((a, b) => b.cassiniScore - a.cassiniScore)
+
+    if (sortedStores.length === 0) {
+      // Fall back to all stores if none meet Cassini threshold
+      sortedStores.push(...storesWithCassiniScore.sort((a, b) => b.cassiniScore - a.cassiniScore))
+    }
+
+    // Calculate allocation weights based on Cassini score
+    const totalCassiniScore = sortedStores.reduce((sum, s) => sum + s.cassiniScore, 0) || 1
+    const storeAllocations = sortedStores.map(s => {
+      const weight = s.cassiniScore / totalCassiniScore
+      return {
+        store: s.store,
+        cassiniScore: s.cassiniScore,
+        targetCount: Math.max(1, Math.floor(skuIds.length * weight))
+      }
+    })
+
+    // New listing boost optimization: spread vs concentrate
+    const boostStrategy = settings?.newListingBoostStrategy || 'spread'
+
+    if (boostStrategy === 'spread') {
+      // Spread listings across stores to maximize total boost benefit
+      let skuIndex = 0
+      let roundRobinIdx = 0
+
+      while (skuIndex < skuIds.length) {
+        const storeAlloc = storeAllocations[roundRobinIdx % storeAllocations.length]
+        assignments.push({
+          sku_id: skuIds[skuIndex],
+          store_id: storeAlloc.store.id,
+          listing_status: 'pending'
+        })
+        skuIndex++
+        roundRobinIdx++
+      }
+    } else {
+      // Concentrate: allocate based on Cassini score weights
+      let skuIndex = 0
+      for (const { store, targetCount } of storeAllocations) {
+        for (let i = 0; i < targetCount && skuIndex < skuIds.length; i++) {
+          assignments.push({
+            sku_id: skuIds[skuIndex],
+            store_id: store.id,
+            listing_status: 'pending'
+          })
+          skuIndex++
+        }
+      }
+
+      // Distribute remaining SKUs
+      let storeIdx = 0
+      while (skuIndex < skuIds.length) {
+        assignments.push({
+          sku_id: skuIds[skuIndex],
+          store_id: storeAllocations[storeIdx % storeAllocations.length].store.id,
+          listing_status: 'pending'
+        })
+        skuIndex++
+        storeIdx++
+      }
     }
   }
 
@@ -1232,7 +1450,7 @@ export async function initializeManagedServiceAccount(
   initializedStores: number
   settings: StoreGroupSettings
 } | null> {
-  // Create managed service group with optimized settings
+  // Create managed service group with Cassini-optimized settings
   const settings: StoreGroupSettings = {
     maxSkusPerStore: 1500,
     minSkusPerStore: 200,
@@ -1244,12 +1462,18 @@ export async function initializeManagedServiceAccount(
     minHealthScore: 55,
     autoDisableUnhealthyStores: true,
     healthCheckFrequencyHours: 4,
-    loadBalancingStrategy: 'weighted',
+    loadBalancingStrategy: 'cassini',  // Cassini-optimized allocation
     rebalanceEnabled: true,
     rebalanceThresholdPercent: 15,
     maxDefectRate: 1.5,  // Stricter for managed
     maxLateShipmentRate: 5.0,
-    complianceCheckEnabled: true
+    complianceCheckEnabled: true,
+    // Cassini optimization settings for managed service
+    cassiniOptimizationEnabled: true,
+    minCassiniReadinessScore: 65,  // Higher threshold for managed
+    prioritizeTopRatedPlus: true,
+    newListingBoostStrategy: 'spread',  // Maximize boost benefit across fleet
+    cassiniRebalanceEnabled: true
   }
 
   const group = await createStoreGroup(
@@ -1336,6 +1560,35 @@ export async function getManagedServiceDashboard(
 
   if (overview.alerts.filter(a => a.severity === 'critical').length > 0) {
     recommendations.push('Critical alerts require immediate attention to prevent account restrictions.')
+  }
+
+  // Cassini-specific recommendations
+  const cassiniMetrics = overview.metrics.cassiniMetrics
+
+  if (cassiniMetrics.avgCassiniReadiness < 60) {
+    recommendations.push('Fleet Cassini readiness is low. Optimize titles, add item specifics, and improve seller metrics.')
+  }
+
+  if (cassiniMetrics.topRatedPlusStores < overview.activeStores * 0.3) {
+    recommendations.push('Less than 30% of stores have Top Rated Plus. Focus on 1-day handling and free returns for +20% visibility.')
+  }
+
+  if (cassiniMetrics.topRatedStores < overview.activeStores * 0.5) {
+    recommendations.push('Less than 50% of stores are Top Rated Sellers. Improve seller metrics for +15% visibility boost.')
+  }
+
+  if (cassiniMetrics.avgVisibilityBoost < 10) {
+    recommendations.push('Average visibility boost is low. Prioritize achieving Top Rated and Top Rated Plus status.')
+  }
+
+  // Calculate Cassini optimization percentage
+  const totalListings = overview.metrics.totalListings
+  if (totalListings > 0 && cassiniMetrics.cassiniOptimizedListings / totalListings < 0.7) {
+    recommendations.push(`Only ${Math.round(cassiniMetrics.cassiniOptimizedListings / totalListings * 100)}% of listings are Cassini-optimized. Run title optimization and add item specifics.`)
+  }
+
+  if (cassiniMetrics.storesWithNewListingBoost < overview.activeStores * 0.2) {
+    recommendations.push('Few stores have active new listing boosts. Consider listing rotation to maximize 48-hour visibility windows.')
   }
 
   return {

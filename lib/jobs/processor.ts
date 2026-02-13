@@ -18,6 +18,11 @@ export type JobType =
   | 'listing_end'
   | 'normalize_products'
   | 'generate_skus'
+  // Cassini optimization jobs
+  | 'cassini_optimize'          // Score and optimize products for Cassini
+  | 'cassini_title_optimize'    // Optimize titles for Cassini algorithm
+  | 'new_listing_boost'         // Manage 48-hour new listing boost windows
+  | 'cassini_reprice'           // Cassini-aware repricing
 
 export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled'
 
