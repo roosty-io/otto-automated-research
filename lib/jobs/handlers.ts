@@ -1025,3 +1025,606 @@ function optimizeTitleForCassini(title: string): string {
 
   return optimized
 }
+
+// =============================================================================
+// LISTING OPTIMIZATION JOB HANDLERS (With Policy Compliance)
+// =============================================================================
+
+import {
+  ListingOptimizer,
+  optimizeListing as optimizeListingFn,
+  quickComplianceCheck,
+  type OptimizationTier,
+} from '@/lib/optimization/listing-optimizer'
+
+import {
+  ScheduledListingWorkflow,
+  createScheduledWorkflow,
+  generateActivationJobs,
+} from '@/lib/optimization/scheduled-listing-workflow'
+
+import {
+  analyzeCompliance,
+  getComplianceScore,
+  hasCriticalViolations,
+} from '@/lib/optimization/policy-compliance'
+
+import {
+  containsVeroBrand,
+  fullComplianceScan,
+} from '@/lib/optimization/vero-blacklist'
+
+// Singleton workflow instance for scheduled listings
+let scheduledWorkflow: ScheduledListingWorkflow | null = null
+
+function getScheduledWorkflow(): ScheduledListingWorkflow {
+  if (!scheduledWorkflow) {
+    scheduledWorkflow = createScheduledWorkflow({
+      activationDelayMs: 12 * 60 * 60 * 1000, // 12 hours
+      tier: 'standard',
+      strictCompliance: true,
+      staggerListings: true,
+      staggerIntervalMs: 30 * 60 * 1000, // 30 minutes
+    })
+  }
+  return scheduledWorkflow
+}
+
+/**
+ * Optimize Listing Job Handler
+ *
+ * Optimizes title and description for Cassini and policy compliance.
+ * This is a tier-differentiated feature.
+ *
+ * Payload:
+ * {
+ *   productId: string,
+ *   title: string,
+ *   description: string,
+ *   tier?: 'basic' | 'standard' | 'premium' | 'enterprise',
+ *   category?: string,
+ *   productName?: string,
+ *   features?: string[],
+ *   specifications?: Record<string, string>,
+ *   strictMode?: boolean
+ * }
+ */
+registerJobHandler('optimize_listing', async (job: Job): Promise<JobResult> => {
+  const {
+    productId,
+    title,
+    description,
+    tier = 'standard',
+    category,
+    productName,
+    features,
+    specifications,
+    strictMode = true,
+    pipelineId,
+  } = job.payload
+
+  if (!productId || !title) {
+    return { success: false, error: 'Product ID and title are required' }
+  }
+
+  try {
+    // Create optimizer with specified tier
+    const optimizer = new ListingOptimizer({
+      tier: tier as OptimizationTier,
+      category,
+      strictMode,
+    })
+
+    // Run full optimization
+    const result = optimizer.optimizeListing(title, description || '', {
+      productName,
+      features,
+      specifications,
+    })
+
+    // Store optimization result
+    const optimizationData = {
+      original_title: title,
+      optimized_title: result.title.optimizedTitle,
+      title_cassini_score: result.title.cassiniScore,
+      title_compliance_score: result.title.complianceScore,
+      title_changes: result.title.changes,
+      title_warnings: result.title.warnings,
+      title_blockers: result.title.blockers,
+
+      original_description: description,
+      optimized_description: result.description.optimizedDescription,
+      description_compliance: result.description.complianceReport.isCompliant,
+      description_risk_score: result.description.complianceReport.riskScore,
+      description_structure_score: result.description.structureScore,
+      description_readability_score: result.description.readabilityScore,
+      description_changes: result.description.changes,
+      description_warnings: result.description.warnings,
+      description_blockers: result.description.blockers,
+
+      overall_score: result.overallScore,
+      can_list: result.canList,
+      all_blockers: result.blockers,
+      tier_benefits: result.tierBenefits,
+      upgrade_benefits: result.upgradeBenefits,
+
+      optimization_tier: tier,
+      optimized_at: new Date().toISOString(),
+    }
+
+    // Update product with optimized data
+    await supabase
+      .from('normalized_products')
+      .update({
+        cassini_optimized_title: result.title.optimizedTitle,
+        cassini_optimized_description: result.description.optimizedDescription,
+        optimization_data: optimizationData,
+        optimization_tier: tier,
+        can_list: result.canList,
+        listing_blockers: result.blockers,
+        optimized_at: new Date().toISOString(),
+      })
+      .eq('id', productId)
+
+    // Continue pipeline if part of one
+    if (pipelineId) {
+      await continuePipeline(pipelineId, 'optimizing', {
+        productId,
+        canList: result.canList,
+        overallScore: result.overallScore,
+        blockers: result.blockers,
+      })
+    }
+
+    return {
+      success: true,
+      data: {
+        productId,
+        canList: result.canList,
+        overallScore: result.overallScore,
+        titleScore: result.title.cassiniScore,
+        complianceScore: result.title.complianceScore,
+        blockers: result.blockers,
+        titleOptimized: result.title.wasModified,
+        descriptionOptimized: result.description.wasModified,
+        tierBenefits: result.tierBenefits,
+      },
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    return { success: false, error: `Optimization failed: ${errorMessage}` }
+  }
+})
+
+/**
+ * Scheduled Listing Job Handler
+ *
+ * Creates a draft listing with 12-hour delayed activation to work around
+ * AutoDS "product does not exist" errors.
+ *
+ * Payload:
+ * {
+ *   productId: string,
+ *   sku: string,
+ *   storeId: string,
+ *   title: string,
+ *   description: string,
+ *   category?: string,
+ *   tier?: OptimizationTier,
+ *   productName?: string,
+ *   features?: string[],
+ *   specifications?: Record<string, string>,
+ *   forceActivate?: boolean (bypass 12h delay - use with caution)
+ * }
+ */
+registerJobHandler('scheduled_listing', async (job: Job): Promise<JobResult> => {
+  const {
+    productId,
+    sku,
+    storeId,
+    title,
+    description,
+    category,
+    tier = 'standard',
+    productName,
+    features,
+    specifications,
+    forceActivate = false,
+    pipelineId,
+  } = job.payload
+
+  if (!productId || !sku || !storeId || !title) {
+    return { success: false, error: 'Product ID, SKU, store ID, and title are required' }
+  }
+
+  try {
+    const workflow = getScheduledWorkflow()
+
+    // Update workflow config based on tier
+    workflow.updateConfig({
+      tier: tier as OptimizationTier,
+      activationDelayMs: forceActivate ? 0 : 12 * 60 * 60 * 1000,
+    })
+
+    // Start the workflow
+    const result = await workflow.startWorkflow({
+      productId,
+      sku,
+      storeId,
+      title,
+      description: description || '',
+      category,
+      source: pipelineId ? 'pipeline' : 'manual',
+      productName,
+      features,
+      specifications,
+    })
+
+    // Store the listing record in database
+    await supabase
+      .from('scheduled_listings')
+      .upsert({
+        id: result.listing.id,
+        product_id: productId,
+        sku,
+        store_id: storeId,
+        state: result.listing.state,
+        original_title: result.listing.originalTitle,
+        optimized_title: result.listing.optimizedTitle,
+        original_description: result.listing.originalDescription,
+        optimized_description: result.listing.optimizedDescription,
+        optimization_result: result.listing.optimizationResult,
+        scheduled_activation_at: result.listing.scheduledActivationAt?.toISOString(),
+        autods_draft_id: result.listing.autodsDraftId,
+        autods_product_id: result.listing.autodsProductId,
+        blockers: result.listing.blockers,
+        tier: result.listing.tier,
+        created_at: result.listing.createdAt.toISOString(),
+      })
+
+    // Continue pipeline if part of one
+    if (pipelineId) {
+      await continuePipeline(pipelineId, 'scheduling', {
+        listingId: result.listing.id,
+        state: result.listing.state,
+        canList: result.success,
+        scheduledActivationAt: result.listing.scheduledActivationAt?.toISOString(),
+      })
+    }
+
+    return {
+      success: result.success,
+      data: {
+        listingId: result.listing.id,
+        state: result.listing.state,
+        message: result.message,
+        scheduledActivationAt: result.listing.scheduledActivationAt?.toISOString(),
+        nextAction: result.nextAction,
+        nextActionAt: result.nextActionAt?.toISOString(),
+        blockers: result.listing.blockers,
+      },
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    return { success: false, error: `Scheduled listing failed: ${errorMessage}` }
+  }
+})
+
+/**
+ * Process Scheduled Activations Job Handler
+ *
+ * Background job that runs periodically to activate scheduled listings
+ * that have passed their 12-hour wait period.
+ *
+ * Payload:
+ * {
+ *   batchSize?: number,
+ *   forceAll?: boolean (activate all scheduled, ignore timing)
+ * }
+ */
+registerJobHandler('process_scheduled_activations', async (job: Job): Promise<JobResult> => {
+  const { batchSize = 50, forceAll = false } = job.payload
+
+  try {
+    const workflow = getScheduledWorkflow()
+
+    // Load pending listings from database into workflow
+    const { data: pendingListings } = await supabase
+      .from('scheduled_listings')
+      .select('*')
+      .in('state', ['scheduled', 'draft_created'])
+      .limit(batchSize)
+
+    if (pendingListings && pendingListings.length > 0) {
+      // Import listings into workflow
+      const listings = pendingListings.map((l) => ({
+        id: l.id,
+        productId: l.product_id,
+        sku: l.sku,
+        storeId: l.store_id,
+        state: l.state,
+        originalTitle: l.original_title,
+        originalDescription: l.original_description,
+        optimizedTitle: l.optimized_title,
+        optimizedDescription: l.optimized_description,
+        optimizationResult: l.optimization_result,
+        createdAt: new Date(l.created_at),
+        draftCreatedAt: l.draft_created_at ? new Date(l.draft_created_at) : undefined,
+        scheduledActivationAt: l.scheduled_activation_at ? new Date(l.scheduled_activation_at) : undefined,
+        activatedAt: l.activated_at ? new Date(l.activated_at) : undefined,
+        autodsProductId: l.autods_product_id,
+        autodsDraftId: l.autods_draft_id,
+        failureReason: l.failure_reason,
+        blockers: l.blockers,
+        retryCount: l.retry_count || 0,
+        maxRetries: 3,
+        tier: l.tier || 'standard',
+        category: l.category,
+        source: l.source || 'pipeline',
+      }))
+
+      workflow.importListings(listings as any)
+    }
+
+    // If force all, update all scheduled listings to be ready now
+    if (forceAll) {
+      await supabase
+        .from('scheduled_listings')
+        .update({ scheduled_activation_at: new Date().toISOString() })
+        .eq('state', 'scheduled')
+    }
+
+    // Process activations
+    const result = await workflow.processScheduledActivations()
+
+    // Update database with results
+    for (const workflowResult of result.results) {
+      await supabase
+        .from('scheduled_listings')
+        .update({
+          state: workflowResult.listing.state,
+          activated_at: workflowResult.listing.activatedAt?.toISOString(),
+          failure_reason: workflowResult.listing.failureReason,
+          retry_count: workflowResult.listing.retryCount,
+          scheduled_activation_at: workflowResult.listing.scheduledActivationAt?.toISOString(),
+        })
+        .eq('id', workflowResult.listing.id)
+    }
+
+    // Get workflow status for response
+    const status = workflow.getWorkflowStatus()
+
+    return {
+      success: true,
+      data: {
+        activated: result.activated,
+        failed: result.failed,
+        pending: result.pending,
+        totalInWorkflow: status.total,
+        byState: status.byState,
+        nextActivation: status.nextActivation?.toISOString(),
+        blockedCount: status.blockedListings.length,
+      },
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    return { success: false, error: `Processing activations failed: ${errorMessage}` }
+  }
+})
+
+/**
+ * Batch Optimize Listings Job Handler
+ *
+ * Optimizes multiple listings at once with tier-based features.
+ *
+ * Payload:
+ * {
+ *   productIds: string[],
+ *   tier?: OptimizationTier,
+ *   category?: string,
+ *   strictMode?: boolean,
+ *   createScheduledListings?: boolean,
+ *   storeId?: string (required if createScheduledListings is true)
+ * }
+ */
+registerJobHandler('batch_optimize_listings', async (job: Job): Promise<JobResult> => {
+  const {
+    productIds,
+    tier = 'standard',
+    category,
+    strictMode = true,
+    createScheduledListings = false,
+    storeId,
+    pipelineId,
+  } = job.payload
+
+  if (!productIds || productIds.length === 0) {
+    return { success: false, error: 'Product IDs are required' }
+  }
+
+  if (createScheduledListings && !storeId) {
+    return { success: false, error: 'Store ID is required when creating scheduled listings' }
+  }
+
+  try {
+    // Get products
+    const { data: products, error } = await supabase
+      .from('normalized_products')
+      .select('*, sku:skus(sku_code)')
+      .in('id', productIds)
+
+    if (error || !products || products.length === 0) {
+      return { success: false, error: 'No products found' }
+    }
+
+    const optimizer = new ListingOptimizer({
+      tier: tier as OptimizationTier,
+      category,
+      strictMode,
+    })
+
+    const results = {
+      total: products.length,
+      optimized: 0,
+      canList: 0,
+      blocked: 0,
+      scheduled: 0,
+      errors: [] as string[],
+    }
+
+    const optimizedProductIds: string[] = []
+
+    for (const product of products) {
+      try {
+        // Run optimization
+        const optimizationResult = optimizer.optimizeListing(
+          product.normalized_title || '',
+          product.description || ''
+        )
+
+        // Update product
+        await supabase
+          .from('normalized_products')
+          .update({
+            cassini_optimized_title: optimizationResult.title.optimizedTitle,
+            cassini_optimized_description: optimizationResult.description.optimizedDescription,
+            optimization_tier: tier,
+            can_list: optimizationResult.canList,
+            listing_blockers: optimizationResult.blockers,
+            optimized_at: new Date().toISOString(),
+          })
+          .eq('id', product.id)
+
+        results.optimized++
+
+        if (optimizationResult.canList) {
+          results.canList++
+          optimizedProductIds.push(product.id)
+
+          // Create scheduled listing if requested
+          if (createScheduledListings && product.sku?.sku_code) {
+            const workflow = getScheduledWorkflow()
+            workflow.updateConfig({ tier: tier as OptimizationTier })
+
+            const workflowResult = await workflow.startWorkflow({
+              productId: product.id,
+              sku: product.sku.sku_code,
+              storeId,
+              title: optimizationResult.title.optimizedTitle,
+              description: optimizationResult.description.optimizedDescription,
+              category,
+              source: 'bulk',
+            })
+
+            if (workflowResult.success) {
+              results.scheduled++
+            }
+          }
+        } else {
+          results.blocked++
+        }
+      } catch (err) {
+        results.errors.push(`Product ${product.id}: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      }
+    }
+
+    // Continue pipeline if part of one
+    if (pipelineId) {
+      await continuePipeline(pipelineId, 'batch_optimizing', {
+        productIds: optimizedProductIds,
+        results,
+      })
+    }
+
+    return {
+      success: true,
+      data: {
+        ...results,
+        productIds: optimizedProductIds,
+      },
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    return { success: false, error: `Batch optimization failed: ${errorMessage}` }
+  }
+})
+
+/**
+ * Compliance Check Job Handler
+ *
+ * Runs compliance checks on listings without modifying them.
+ * Useful for auditing existing listings.
+ *
+ * Payload:
+ * {
+ *   content: string,
+ *   contentType: 'title' | 'description' | 'both',
+ *   category?: string,
+ *   strictMode?: boolean
+ * }
+ */
+registerJobHandler('compliance_check', async (job: Job): Promise<JobResult> => {
+  const {
+    content,
+    title,
+    description,
+    contentType = 'both',
+    category,
+    strictMode = true,
+  } = job.payload
+
+  if (!content && !title && !description) {
+    return { success: false, error: 'Content, title, or description is required' }
+  }
+
+  try {
+    const results: any = {}
+
+    // Check VERO brands
+    const textToCheck = content || `${title || ''} ${description || ''}`
+    const veroCheck = containsVeroBrand(textToCheck)
+    results.vero = veroCheck
+
+    // Full compliance scan
+    const complianceScan = fullComplianceScan(textToCheck, category)
+    results.compliance = {
+      isCompliant: complianceScan.isCompliant,
+      overallRisk: complianceScan.overallRisk,
+      issues: complianceScan.issues,
+      sanitizedText: complianceScan.sanitizedText,
+    }
+
+    // Detailed compliance analysis
+    const complianceReport = analyzeCompliance(textToCheck, category, {
+      strictMode,
+      includeWarnings: true,
+    })
+    results.detailedReport = {
+      isCompliant: complianceReport.isCompliant,
+      overallRisk: complianceReport.overallRisk,
+      riskScore: complianceReport.riskScore,
+      violationCount: complianceReport.violations.length,
+      warningCount: complianceReport.warnings.length,
+      violations: complianceReport.violations,
+      warnings: complianceReport.warnings,
+      canAutoFix: complianceReport.canAutoFix,
+      autoFixedContent: complianceReport.autoFixedContent,
+    }
+
+    // Quick check summary
+    const quickCheck = quickComplianceCheck(textToCheck, category)
+    results.quickCheck = quickCheck
+
+    // Calculate overall compliance score
+    results.complianceScore = getComplianceScore(textToCheck, category)
+    results.hasCriticalViolations = hasCriticalViolations(textToCheck, category)
+
+    return {
+      success: true,
+      data: results,
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    return { success: false, error: `Compliance check failed: ${errorMessage}` }
+  }
+})

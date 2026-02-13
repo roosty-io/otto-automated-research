@@ -23,6 +23,12 @@ export type JobType =
   | 'cassini_title_optimize'    // Optimize titles for Cassini algorithm
   | 'new_listing_boost'         // Manage 48-hour new listing boost windows
   | 'cassini_reprice'           // Cassini-aware repricing
+  // Listing optimization jobs (with policy compliance)
+  | 'optimize_listing'          // Optimize single listing (title + description)
+  | 'batch_optimize_listings'   // Batch optimize multiple listings
+  | 'scheduled_listing'         // Create draft + schedule 12h delayed activation
+  | 'process_scheduled_activations' // Activate scheduled listings
+  | 'compliance_check'          // Check content for policy violations
 
 export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled'
 
