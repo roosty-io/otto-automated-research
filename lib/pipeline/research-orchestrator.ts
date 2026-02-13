@@ -44,9 +44,15 @@ export interface ResearchPipelineOptions {
     targetTopRatedPlus?: boolean      // Focus on products compatible with TRP sellers
   }
 
+  // Store context (for associating results with a specific store)
+  storeId?: string
+
   // User context
   userId?: string
   sessionId?: string
+
+  // Test mode (skips certain external API calls)
+  testMode?: boolean
 }
 
 export interface PipelineProgress {
@@ -157,6 +163,10 @@ export async function startResearchPipeline(
         cassini_prioritize: options.cassiniOptimization?.prioritizeByVisibility ?? true,
         cassini_optimize_titles: options.cassiniOptimization?.optimizeTitles ?? true,
         cassini_target_trp: options.cassiniOptimization?.targetTopRatedPlus ?? false,
+        // Store association
+        store_id: options.storeId || null,
+        // Test mode flag
+        test_mode: options.testMode || false,
       })
     }
 

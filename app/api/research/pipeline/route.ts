@@ -27,6 +27,8 @@ import {
  *   autoSourceFromAmazon?: boolean,
  *   autoNormalize?: boolean,
  *   autoGenerateSkus?: boolean,
+ *   storeId?: string,       // Associate results with a specific store
+ *   testMode?: boolean,     // Enable test mode (limited external API calls)
  *   // For 'status' or 'cancel':
  *   pipelineId?: string,
  *   // For 'list':
@@ -53,8 +55,10 @@ export async function POST(request: Request) {
           autoSourceFromAmazon: params.autoSourceFromAmazon ?? true,
           autoNormalize: params.autoNormalize ?? false,
           autoGenerateSkus: params.autoGenerateSkus ?? false,
+          storeId: params.storeId,
           userId: params.userId,
           sessionId: params.sessionId,
+          testMode: params.testMode ?? false,
         })
 
         if (!result.success) {
