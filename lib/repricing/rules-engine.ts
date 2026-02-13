@@ -3,13 +3,21 @@
  *
  * Defines and evaluates rules for automated price optimization:
  * - Competitor-based repricing
- * - Margin protection rules
+ * - Profit protection rules ($2 minimum net profit)
  * - Velocity-based pricing
  * - Time-based adjustments
  * - Inventory-level pricing
+ *
+ * Key constraint: All prices must yield minimum $2 net profit after fees.
  */
 
 import { supabase } from '@/lib/supabase'
+import {
+  calculateNetProfit,
+  calculateMinSellPrice,
+  DEFAULT_PRICING_CONFIG,
+  type PricingConfig,
+} from '@/lib/pricing'
 
 export type RepricingStrategy =
   | 'match_lowest' // Match the lowest competitor price
@@ -53,9 +61,10 @@ export interface PriceAdjustment {
 export interface PriceConstraints {
   minPrice?: number
   maxPrice?: number
-  minMargin?: number // Minimum margin percentage
+  minMargin?: number // Minimum margin percentage (legacy - prefer minNetProfit)
   maxMargin?: number // Maximum margin percentage
   minMarkup?: number // Minimum markup over cost
+  minNetProfit?: number // Minimum net profit in dollars (default: $2)
   maxPriceChange?: number // Max change per adjustment (percentage)
   cooldownHours?: number // Hours between adjustments
 }
@@ -85,6 +94,7 @@ export interface ListingPriceData {
   lastSaleAt?: string
   lastPriceChange?: string
   currentMargin: number
+  currentNetProfit?: number // Net profit after all fees
   salesVelocity: number // Sales per day
   viewVelocity: number // Views per day
 }
@@ -101,19 +111,22 @@ export interface RepricingRecommendation {
   strategy: RepricingStrategy
   reason: string
   newMargin: number
+  newNetProfit: number // Net profit after all fees
   constraints: {
     appliedMin: boolean
     appliedMax: boolean
     appliedMargin: boolean
+    appliedProfit: boolean // True if $2 minimum profit floor was applied
     appliedCooldown: boolean
   }
 }
 
 // Default repricing rules
+// All rules enforce $2 minimum net profit as a floor constraint
 const DEFAULT_RULES: Omit<RepricingRule, 'id'>[] = [
   {
     name: 'Beat Competitor by 2%',
-    description: 'When competitors are lower, beat their price by 2%',
+    description: 'When competitors are lower, beat their price by 2% (minimum $2 profit)',
     isActive: true,
     priority: 100,
     strategy: 'beat_lowest',
@@ -128,8 +141,8 @@ const DEFAULT_RULES: Omit<RepricingRule, 'id'>[] = [
       reference: 'competitor_lowest',
     },
     constraints: {
-      minMargin: 15,
-      maxPriceChange: 10,
+      minNetProfit: 2, // $2 minimum profit floor
+      maxPriceChange: 15,
       cooldownHours: 24,
     },
   },
@@ -157,7 +170,7 @@ const DEFAULT_RULES: Omit<RepricingRule, 'id'>[] = [
   },
   {
     name: 'Slow Mover Price Decay',
-    description: 'Reduce price by 3% for items with no sales after 14 days',
+    description: 'Reduce price by 3% for items with no sales after 14 days (minimum $2 profit)',
     isActive: true,
     priority: 80,
     strategy: 'time_decay',
@@ -173,8 +186,8 @@ const DEFAULT_RULES: Omit<RepricingRule, 'id'>[] = [
       reference: 'current_price',
     },
     constraints: {
-      minMargin: 10,
-      maxPriceChange: 5,
+      minNetProfit: 2, // $2 minimum profit floor
+      maxPriceChange: 8,
       cooldownHours: 72,
     },
   },
@@ -225,7 +238,7 @@ const DEFAULT_RULES: Omit<RepricingRule, 'id'>[] = [
   },
   {
     name: 'Match Competitor Average',
-    description: 'Align with average competitor price when significantly higher',
+    description: 'Align with average competitor price when significantly higher (minimum $2 profit)',
     isActive: true,
     priority: 75,
     strategy: 'match_lowest',
@@ -240,29 +253,27 @@ const DEFAULT_RULES: Omit<RepricingRule, 'id'>[] = [
       reference: 'competitor_avg',
     },
     constraints: {
-      minMargin: 12,
+      minNetProfit: 2, // $2 minimum profit floor
       maxPriceChange: 15,
       cooldownHours: 48,
     },
   },
   {
-    name: 'Protect Minimum Margin',
-    description: 'Increase price if margin falls below 10%',
+    name: 'Protect Minimum Profit',
+    description: 'Increase price if net profit falls below $2 after fees',
     isActive: true,
-    priority: 100,
+    priority: 110, // Highest priority - profit protection always wins
     strategy: 'target_margin',
-    conditions: [
-      { field: 'currentMargin', operator: 'lt', value: 10 },
-    ],
+    conditions: [], // Always check - applyConstraints will handle the logic
     adjustment: {
       type: 'formula',
-      value: 15, // Target 15% margin
+      value: 0, // Will be overridden by minNetProfit constraint
       direction: 'set',
       reference: 'cost_price',
     },
     constraints: {
-      minMargin: 15,
-      maxPriceChange: 20,
+      minNetProfit: 2, // $2 minimum profit - this is the key constraint
+      maxPriceChange: 25,
     },
   },
 ]
@@ -494,14 +505,29 @@ function calculateNewPrice(
 
 /**
  * Apply constraints to the calculated price
+ *
+ * Key rule: Always enforce minimum $2 net profit after all fees.
+ * This uses the pricing engine for accurate fee calculation.
  */
 function applyConstraints(
   listing: ListingPriceData,
   newPrice: number,
-  constraints: PriceConstraints
-): { price: number; applied: { min: boolean; max: boolean; margin: boolean; change: boolean } } {
+  constraints: PriceConstraints,
+  pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG
+): { price: number; applied: { min: boolean; max: boolean; margin: boolean; change: boolean; profit: boolean } } {
   let finalPrice = newPrice
-  const applied = { min: false, max: false, margin: false, change: false }
+  const applied = { min: false, max: false, margin: false, change: false, profit: false }
+
+  // CRITICAL: Apply minimum net profit constraint first ($2 default)
+  // This ensures no price change can result in a loss
+  const minProfit = constraints.minNetProfit ?? pricingConfig.minProfitDollars
+  if (listing.costPrice > 0) {
+    const minPriceForProfit = calculateMinSellPrice(listing.costPrice, minProfit, pricingConfig)
+    if (finalPrice < minPriceForProfit) {
+      finalPrice = Math.ceil(minPriceForProfit * 100) / 100
+      applied.profit = true
+    }
+  }
 
   // Apply min price constraint
   if (constraints.minPrice && finalPrice < constraints.minPrice) {
@@ -515,7 +541,7 @@ function applyConstraints(
     applied.max = true
   }
 
-  // Apply min margin constraint
+  // Apply legacy min margin constraint (if specified and more restrictive)
   if (constraints.minMargin && listing.costPrice > 0) {
     const minPriceForMargin = listing.costPrice / (1 - constraints.minMargin / 100)
     if (finalPrice < minPriceForMargin) {
@@ -548,15 +574,28 @@ function applyConstraints(
     }
   }
 
+  // Final safety check: ensure we still meet minimum profit after all adjustments
+  if (listing.costPrice > 0) {
+    const netProfit = calculateNetProfit(finalPrice, listing.costPrice, pricingConfig)
+    if (netProfit < minProfit) {
+      // Price constraints conflict with profit requirement - profit wins
+      finalPrice = Math.ceil(calculateMinSellPrice(listing.costPrice, minProfit, pricingConfig) * 100) / 100
+      applied.profit = true
+    }
+  }
+
   return { price: finalPrice, applied }
 }
 
 /**
  * Evaluate a repricing rule against a listing
+ *
+ * Ensures all price recommendations yield minimum $2 net profit.
  */
 export function evaluateRepricingRule(
   rule: RepricingRule,
-  listing: ListingPriceData
+  listing: ListingPriceData,
+  pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG
 ): RepricingRecommendation | null {
   // Check if all conditions are met
   for (const condition of rule.conditions) {
@@ -568,8 +607,13 @@ export function evaluateRepricingRule(
   // Calculate new price
   const rawNewPrice = calculateNewPrice(listing, rule.adjustment)
 
-  // Apply constraints
-  const { price: finalPrice, applied } = applyConstraints(listing, rawNewPrice, rule.constraints)
+  // Apply constraints (including $2 minimum profit floor)
+  const { price: finalPrice, applied } = applyConstraints(
+    listing,
+    rawNewPrice,
+    rule.constraints,
+    pricingConfig
+  )
 
   // Skip if no actual change
   if (Math.abs(finalPrice - listing.currentPrice) < 0.01) {
@@ -581,8 +625,16 @@ export function evaluateRepricingRule(
     ? ((finalPrice - listing.costPrice) / finalPrice) * 100
     : 0
 
+  // Calculate actual net profit using the pricing engine
+  const newNetProfit = listing.costPrice > 0
+    ? calculateNetProfit(finalPrice, listing.costPrice, pricingConfig)
+    : 0
+
   // Generate reason
-  const reason = generateReason(rule, listing, finalPrice)
+  let reason = generateReason(rule, listing, finalPrice)
+  if (applied.profit) {
+    reason += ` (adjusted to meet $${pricingConfig.minProfitDollars} min profit)`
+  }
 
   return {
     assignmentId: listing.assignmentId,
@@ -596,10 +648,12 @@ export function evaluateRepricingRule(
     strategy: rule.strategy,
     reason,
     newMargin: Math.round(newMargin * 10) / 10,
+    newNetProfit: Math.round(newNetProfit * 100) / 100,
     constraints: {
       appliedMin: applied.min,
       appliedMax: applied.max,
       appliedMargin: applied.margin,
+      appliedProfit: applied.profit,
       appliedCooldown: false, // Cooldown is checked separately
     },
   }
@@ -637,14 +691,17 @@ function generateReason(
 
 /**
  * Evaluate all rules against a listing and return the best recommendation
+ *
+ * All recommendations are guaranteed to meet $2 minimum profit.
  */
 export function evaluateAllRepricingRules(
   rules: RepricingRule[],
-  listing: ListingPriceData
+  listing: ListingPriceData,
+  pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG
 ): RepricingRecommendation | null {
   // Rules are sorted by priority (highest first)
   for (const rule of rules) {
-    const recommendation = evaluateRepricingRule(rule, listing)
+    const recommendation = evaluateRepricingRule(rule, listing, pricingConfig)
     if (recommendation) {
       return recommendation
     }
@@ -653,14 +710,51 @@ export function evaluateAllRepricingRules(
 }
 
 /**
+ * Calculate current net profit for a listing
+ */
+export function getListingNetProfit(
+  listing: ListingPriceData,
+  pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG
+): number {
+  return calculateNetProfit(listing.currentPrice, listing.costPrice, pricingConfig)
+}
+
+/**
+ * Check if a listing is currently profitable (meeting $2 minimum)
+ */
+export function isListingProfitable(
+  listing: ListingPriceData,
+  pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG
+): boolean {
+  const netProfit = getListingNetProfit(listing, pricingConfig)
+  return netProfit >= pricingConfig.minProfitDollars
+}
+
+/**
+ * Get minimum viable price for a listing
+ */
+export function getListingMinPrice(
+  listing: ListingPriceData,
+  pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG
+): number {
+  return calculateMinSellPrice(listing.costPrice, pricingConfig.minProfitDollars, pricingConfig)
+}
+
+/**
  * Enrich listing data with calculated fields
+ *
+ * Includes net profit calculation using the pricing engine.
  */
 export function enrichListingPriceData(
-  listing: Partial<ListingPriceData> & { assignmentId: string }
+  listing: Partial<ListingPriceData> & { assignmentId: string },
+  pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG
 ): ListingPriceData {
   const currentPrice = listing.currentPrice || 0
   const costPrice = listing.costPrice || 0
   const currentMargin = currentPrice > 0 ? ((currentPrice - costPrice) / currentPrice) * 100 : 0
+  const currentNetProfit = currentPrice > 0 && costPrice > 0
+    ? calculateNetProfit(currentPrice, costPrice, pricingConfig)
+    : 0
 
   const daysListed = listing.daysListed || 1
   const salesVelocity = daysListed > 0 ? (listing.sales || 0) / daysListed : 0
@@ -683,6 +777,7 @@ export function enrichListingPriceData(
     lastSaleAt: listing.lastSaleAt,
     lastPriceChange: listing.lastPriceChange,
     currentMargin,
+    currentNetProfit,
     salesVelocity,
     viewVelocity,
   }
@@ -708,18 +803,20 @@ function mapRuleFromDb(row: any): RepricingRule {
 
 /**
  * Get default repricing rules templates
+ *
+ * All rules enforce $2 minimum net profit as the floor constraint.
+ * This ensures no repricing action can result in a loss.
  */
 export function getDefaultRepricingRules(): Omit<RepricingRule, 'id' | 'createdAt' | 'updatedAt'>[] {
   return [
     {
       name: 'Beat Lowest Competitor',
-      description: 'Automatically beat the lowest competitor price by 1%',
+      description: 'Automatically beat the lowest competitor price by 1% (minimum $2 profit)',
       isActive: true,
       priority: 1,
       strategy: 'beat_lowest',
       conditions: [
         { field: 'competitorCount', operator: 'gte', value: 1 },
-        { field: 'currentMargin', operator: 'gte', value: 10 },
       ],
       adjustment: {
         type: 'percentage',
@@ -728,20 +825,19 @@ export function getDefaultRepricingRules(): Omit<RepricingRule, 'id' | 'createdA
         reference: 'competitor_lowest',
       },
       constraints: {
-        minMargin: 8,
+        minNetProfit: 2, // $2 minimum profit floor
         maxPriceChange: 15,
         cooldownHours: 24,
       },
     },
     {
       name: 'Match Low Competitors',
-      description: 'Match the lowest price when margin is healthy',
+      description: 'Match the lowest price when profitable (minimum $2 profit)',
       isActive: true,
       priority: 2,
       strategy: 'match_lowest',
       conditions: [
         { field: 'competitorCount', operator: 'gte', value: 3 },
-        { field: 'currentMargin', operator: 'gte', value: 15 },
       ],
       adjustment: {
         type: 'fixed',
@@ -750,14 +846,14 @@ export function getDefaultRepricingRules(): Omit<RepricingRule, 'id' | 'createdA
         reference: 'competitor_lowest',
       },
       constraints: {
-        minMargin: 10,
+        minNetProfit: 2, // $2 minimum profit floor
         maxPriceChange: 20,
         cooldownHours: 12,
       },
     },
     {
       name: 'Slow Seller Price Decay',
-      description: 'Gradually reduce price on slow-selling items',
+      description: 'Gradually reduce price on slow-selling items (minimum $2 profit)',
       isActive: true,
       priority: 3,
       strategy: 'time_decay',
@@ -772,7 +868,7 @@ export function getDefaultRepricingRules(): Omit<RepricingRule, 'id' | 'createdA
         reference: 'current_price',
       },
       constraints: {
-        minMargin: 5,
+        minNetProfit: 2, // $2 minimum profit floor
         maxPriceChange: 10,
         cooldownHours: 168, // Weekly
       },
@@ -800,24 +896,21 @@ export function getDefaultRepricingRules(): Omit<RepricingRule, 'id' | 'createdA
       },
     },
     {
-      name: 'Target Margin Protection',
-      description: 'Ensure minimum margin is maintained',
+      name: 'Minimum Profit Protection',
+      description: 'Ensure $2 minimum net profit after all fees',
       isActive: true,
-      priority: 5,
+      priority: 10, // Highest priority - runs last to ensure compliance
       strategy: 'target_margin',
-      conditions: [
-        { field: 'currentMargin', operator: 'lt', value: 10 },
-      ],
+      conditions: [], // Always applies - constraint logic handles it
       adjustment: {
-        type: 'percentage',
-        value: 15,
+        type: 'formula',
+        value: 0,
         direction: 'set',
         reference: 'cost_price',
       },
       constraints: {
-        minMargin: 10,
+        minNetProfit: 2, // $2 minimum profit - the key constraint
         maxPriceChange: 25,
-        cooldownHours: 24,
       },
     },
     {
@@ -840,23 +933,6 @@ export function getDefaultRepricingRules(): Omit<RepricingRule, 'id' | 'createdA
         maxMargin: 50,
         maxPriceChange: 15,
         cooldownHours: 72,
-      },
-    },
-    {
-      name: 'Stay Above Floor',
-      description: 'Never drop below minimum profitable price',
-      isActive: true,
-      priority: 10,
-      strategy: 'stay_above',
-      conditions: [],
-      adjustment: {
-        type: 'percentage',
-        value: 5,
-        direction: 'set',
-        reference: 'cost_price',
-      },
-      constraints: {
-        minMargin: 5,
       },
     },
   ]

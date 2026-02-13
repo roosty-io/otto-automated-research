@@ -669,6 +669,7 @@ export class HighThroughputOrchestrator extends EventEmitter {
 
   /**
    * Process SKU generation stage
+   * Includes pricing qualification ($11 min buy price, $2 min profit)
    */
   private async processSkuGenerationStage(): Promise<void> {
     if (this.skuQueue.length === 0) return;
@@ -678,6 +679,21 @@ export class HighThroughputOrchestrator extends EventEmitter {
     for (const product of batch) {
       try {
         const sku = this.generateSku(product);
+
+        // No valid cost price
+        if (!sku) {
+          product.errors.push('No valid cost price available');
+          this.metrics.errorsByStage.generating_skus++;
+          continue;
+        }
+
+        // Failed pricing qualification
+        if (!sku.qualified) {
+          product.errors.push(`Pricing disqualified: ${sku.disqualifyReason}`);
+          this.metrics.errorsByStage.generating_skus++;
+          continue;
+        }
+
         product.skuData = sku;
         product.stage = 'optimizing';
         this.optimizationQueue.push(product);
@@ -741,8 +757,10 @@ export class HighThroughputOrchestrator extends EventEmitter {
       sku_code: product.skuData.skuCode,
       optimized_title: product.optimizedData.optimizedTitle,
       optimized_description: product.optimizedData.optimizedDescription,
-      cost_price: product.keepaData?.buyBoxPrice || product.rawData.price,
+      cost_price: product.skuData.costPrice,
       sell_price: product.skuData.sellPrice,
+      net_profit: product.skuData.netProfit,
+      price_band: product.skuData.priceBand,
       quality_score: product.qualityScore,
       cassini_score: product.cassiniScore,
       status: 'ready',
@@ -750,6 +768,7 @@ export class HighThroughputOrchestrator extends EventEmitter {
         sourceType: product.sourceType,
         sourceId: product.sourceId,
         processingTimeMs: Date.now() - product.createdAt.getTime(),
+        minProfitMet: product.skuData.netProfit >= 2.00,
       },
     }));
 
@@ -840,33 +859,81 @@ export class HighThroughputOrchestrator extends EventEmitter {
   }
 
   /**
-   * Generate SKU
+   * Generate SKU with proper pricing
    */
   private generateSku(product: PipelineProduct): {
     skuCode: string;
     sellPrice: number;
+    costPrice: number;
+    netProfit: number;
     priceBand: string;
-  } {
+    qualified: boolean;
+    disqualifyReason?: string;
+  } | null {
+    // Import pricing engine
+    const {
+      calculateSellPrice,
+      checkProductQualification,
+      DEFAULT_PRICING_CONFIG,
+    } = require('@/lib/pricing');
+
     const category = (product.normalizedData?.normalizedCategory || 'GEN').slice(0, 3).toUpperCase();
     const timestamp = Date.now().toString(36).toUpperCase();
     const random = Math.random().toString(36).slice(2, 6).toUpperCase();
 
-    const costPrice = product.keepaData?.buyBoxPrice || product.rawData.price || 10;
-    const markup = 1.35;  // 35% markup
-    const fees = 1.13;    // 13% eBay fees
-    const sellPrice = Math.ceil(costPrice * markup * fees) - 0.01;
+    const costPrice = product.keepaData?.buyBoxPrice || product.rawData.price || 0;
 
+    // Skip products without valid cost price
+    if (!costPrice || costPrice <= 0) {
+      return null;
+    }
+
+    // Get sales volume for high-volume exception check
+    const salesPerMonth = product.keepaData?.monthlySales ||
+      product.rawData.soldCount ||
+      product.rawData.salesPerMonth ||
+      0;
+
+    // Check product qualification ($11 min, high-volume exception)
+    const qualification = checkProductQualification({
+      costPrice,
+      salesPerMonth,
+    });
+
+    if (!qualification.qualified) {
+      return {
+        skuCode: `${category}-${timestamp}-${random}`,
+        sellPrice: 0,
+        costPrice,
+        netProfit: 0,
+        priceBand: 'disqualified',
+        qualified: false,
+        disqualifyReason: qualification.reason,
+      };
+    }
+
+    // Calculate optimal sell price with $2 minimum profit
+    const pricing = calculateSellPrice({
+      costPrice,
+      salesPerMonth,
+      competitorLowestPrice: product.rawData.competitorPrice,
+    });
+
+    // Determine price band
     let priceBand = 'mid';
-    if (sellPrice < 15) priceBand = 'budget';
-    else if (sellPrice < 30) priceBand = 'low';
-    else if (sellPrice < 75) priceBand = 'mid';
-    else if (sellPrice < 150) priceBand = 'high';
+    if (pricing.sellPrice < 15) priceBand = 'budget';
+    else if (pricing.sellPrice < 30) priceBand = 'low';
+    else if (pricing.sellPrice < 75) priceBand = 'mid';
+    else if (pricing.sellPrice < 150) priceBand = 'high';
     else priceBand = 'premium';
 
     return {
       skuCode: `${category}-${timestamp}-${random}`,
-      sellPrice,
+      sellPrice: pricing.sellPrice,
+      costPrice: pricing.costPrice,
+      netProfit: pricing.netProfit,
       priceBand,
+      qualified: true,
     };
   }
 
