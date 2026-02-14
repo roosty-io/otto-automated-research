@@ -23,7 +23,8 @@ export interface ResearchPipelineOptions {
   // Research source selection
   // - 'zik': Browser-based ZIK Analytics scraping (requires browser)
   // - 'keepa': API-based Keepa Best Sellers (no browser required, scalable)
-  researchSource?: 'zik' | 'keepa'
+  // - 'both': Use both ZIK for eBay demand + Keepa for Amazon sourcing (recommended)
+  researchSource?: 'zik' | 'keepa' | 'both'
 
   // ZIK/Keepa search options
   query?: string
@@ -119,28 +120,62 @@ export async function startResearchPipeline(
     // Save initial pipeline state
     await savePipelineState(pipelineId, progress)
 
-    // Determine research source (default to keepa for scalability - no browser required)
-    const researchSource = options.researchSource || 'keepa'
+    // Determine research source (default to 'both' for comprehensive research)
+    const researchSource = options.researchSource || 'both'
+    const useZik = researchSource === 'zik' || researchSource === 'both'
+    const useKeepa = researchSource === 'keepa' || researchSource === 'both'
 
     // Check rate limits before starting
-    if (researchSource === 'zik') {
+    if (useZik) {
       const zikLimitStatus = await rateLimiter.check('zik', 'search')
       if (!zikLimitStatus.allowed) {
-        return {
-          success: false,
-          pipelineId,
-          progress,
-          error: `ZIK rate limit exceeded. Retry after ${zikLimitStatus.retryAfterMs}ms`,
+        if (researchSource === 'zik') {
+          // ZIK-only mode and rate limited
+          return {
+            success: false,
+            pipelineId,
+            progress,
+            error: `ZIK rate limit exceeded. Retry after ${zikLimitStatus.retryAfterMs}ms`,
+          }
+        } else {
+          // 'both' mode - warn but continue with Keepa only
+          console.log(`[Pipeline ${pipelineId}] ZIK rate limited, continuing with Keepa only`)
         }
       }
     }
 
-    // Create the research job based on source
-    let researchJob
-    if (researchSource === 'keepa') {
-      // Keepa-based research (no browser required, API-only)
-      console.log(`[Pipeline ${pipelineId}] Using Keepa API research (no browser required)`)
-      researchJob = await createJob('keepa_research', {
+    // Create research jobs based on source(s)
+    const researchJobs: string[] = []
+
+    // ZIK research job (eBay demand data)
+    if (useZik) {
+      const zikLimitStatus = await rateLimiter.check('zik', 'search')
+      if (zikLimitStatus.allowed) {
+        console.log(`[Pipeline ${pipelineId}] Creating ZIK research job (eBay demand data)`)
+        const zikJob = await createJob('zik_research', {
+          pipelineId,
+          filters: {
+            query: options.query,
+            category: options.category,
+            minSold: options.minSold || 5,
+            maxSold: options.maxSold,
+            minPrice: options.minPrice,
+            maxPrice: options.maxPrice,
+            dateRange: options.dateRange || '30',
+          },
+          maxResults: options.maxProducts || 50,
+          userId: options.userId,
+        })
+        if (zikJob) {
+          researchJobs.push(zikJob.id)
+        }
+      }
+    }
+
+    // Keepa research job (Amazon sourcing data)
+    if (useKeepa) {
+      console.log(`[Pipeline ${pipelineId}] Creating Keepa research job (Amazon sourcing data)`)
+      const keepaJob = await createJob('keepa_research', {
         pipelineId,
         categoryName: options.category,
         filters: {
@@ -152,32 +187,28 @@ export async function startResearchPipeline(
         },
         maxResults: options.maxProducts || 50,
         userId: options.userId,
+        enrichProducts: true, // Enable enrichment when used with ZIK
       })
-    } else {
-      // ZIK-based research (requires browser)
-      console.log(`[Pipeline ${pipelineId}] Using ZIK browser research`)
-      researchJob = await createJob('zik_research', {
-        pipelineId,
-        filters: {
-          query: options.query,
-          category: options.category,
-          minSold: options.minSold || 5,
-          maxSold: options.maxSold,
-          minPrice: options.minPrice,
-          maxPrice: options.maxPrice,
-          dateRange: options.dateRange || '30',
-        },
-        maxResults: options.maxProducts || 50,
-        userId: options.userId,
-      })
+      if (keepaJob) {
+        researchJobs.push(keepaJob.id)
+      }
     }
 
-    progress.jobIds.push(researchJob.id)
+    if (researchJobs.length === 0) {
+      return {
+        success: false,
+        pipelineId,
+        progress,
+        error: 'No research sources available (all rate limited)',
+      }
+    }
+
+    progress.jobIds.push(...researchJobs)
     progress.stage = 'researching'
     progress.progress = 10
     await savePipelineState(pipelineId, progress)
 
-    console.log(`[Pipeline ${pipelineId}] Created research job: ${researchJob.id}`)
+    console.log(`[Pipeline ${pipelineId}] Created research jobs: ${researchJobs.join(', ')}`)
 
     // If auto-sourcing is enabled, queue the follow-up jobs
     if (options.autoSourceFromAmazon) {

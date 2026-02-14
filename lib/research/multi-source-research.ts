@@ -1,14 +1,19 @@
 /**
  * Multi-Source Product Research Service
  *
- * Provides robust product research with multiple data sources and fallbacks:
+ * Provides robust product research with multiple data sources:
  * 1. eBay Browse API (primary - official, stable)
- * 2. ZIK Analytics (secondary - more sold data but fragile scraper)
- * 3. Keepa (Amazon sourcing data)
+ * 2. ZIK Analytics (secondary - sold data with seller info)
+ * 3. Keepa (Amazon sourcing data - enabled by default)
+ *
+ * The system uses BOTH ZIK and Keepa together:
+ * - ZIK: Provides eBay demand data (sold counts, seller info, trending products)
+ * - Keepa: Provides Amazon sourcing data (prices, sales rank, availability)
  *
  * Key features:
  * - Automatic failover between sources
  * - Data validation and quality scoring
+ * - Keepa enrichment enabled by default for margin calculation
  * - Caching to reduce API calls
  * - Rate limiting per source
  */
@@ -263,7 +268,7 @@ export async function researchProducts(
   const startTime = Date.now()
   const {
     sources = ['ebay_api', 'zik'],
-    enrichWithKeepa = false,
+    enrichWithKeepa = true, // Enable Keepa enrichment by default for Amazon sourcing data
     storeId,
   } = options
 
