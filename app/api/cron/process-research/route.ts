@@ -7,6 +7,7 @@ export const maxDuration = 300 // 5 minutes max
 // Job types to process in this cron
 const RESEARCH_JOB_TYPES: JobType[] = [
   'zik_research',
+  'keepa_research',  // API-based research (no browser required)
   'keepa_lookup',
   'normalize_products',
   'generate_skus',

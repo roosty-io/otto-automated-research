@@ -14,6 +14,7 @@
  *     stages: 'research_only' | 'research_sku' | 'full_pipeline',
  *     priceRange?: { min: number, max: number },
  *     minSold?: number,
+ *     researchSource?: 'zik' | 'keepa',  // 'keepa' for API-only (no browser required)
  *   }
  * }
  *
@@ -37,6 +38,7 @@ export interface TestConfig {
   priceRange?: { min: number; max: number }
   minSold?: number
   dateRange?: '7' | '14' | '30' | '90'
+  researchSource?: 'zik' | 'keepa'  // 'keepa' for API-only (no browser required)
 }
 
 interface TestRunResult {
@@ -134,6 +136,8 @@ export async function POST(request: Request) {
       dateRange: testConfig.dateRange ?? '30',
       storeId,
       testMode: true,
+      // Use Keepa research source for API-only mode (no browser required)
+      researchSource: testConfig.researchSource || 'keepa',  // Default to keepa for scalability
       ...stageOptions[testConfig.stages],
       // Enable Cassini for all tests
       cassiniOptimization: {

@@ -14,6 +14,33 @@
 // Keepa API configuration
 const KEEPA_API_BASE = 'https://api.keepa.com'
 
+// Create proxy-aware fetch function for containerized environments
+function getProxyFetch(): typeof fetch {
+  const proxyUrl = process.env.GLOBAL_AGENT_HTTP_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTPS_PROXY
+
+  if (!proxyUrl || typeof window !== 'undefined') {
+    return fetch
+  }
+
+  try {
+    const { ProxyAgent, fetch: undiciFetch } = require('undici')
+    const proxyAgent = new ProxyAgent(proxyUrl)
+    console.log('[Keepa] Using proxy for API calls')
+
+    return ((input: RequestInfo | URL, init?: RequestInit) => {
+      return undiciFetch(input as any, {
+        ...init,
+        dispatcher: proxyAgent,
+      } as any)
+    }) as typeof fetch
+  } catch (e) {
+    console.warn('[Keepa] Failed to create proxy fetch, using default:', e)
+    return fetch
+  }
+}
+
 // Amazon domain IDs
 export const AMAZON_DOMAINS = {
   US: 1,
@@ -285,7 +312,9 @@ class KeepaClient {
       url.searchParams.set(key, String(value))
     }
 
-    const response = await fetch(url.toString())
+    // Use proxy-aware fetch for containerized environments
+    const proxyFetch = getProxyFetch()
+    const response = await proxyFetch(url.toString())
 
     if (!response.ok) {
       throw new Error(`Keepa API error: ${response.status} ${response.statusText}`)

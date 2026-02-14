@@ -10,6 +10,7 @@ import { rateLimiter } from '@/lib/automation'
 
 export type JobType =
   | 'zik_research'
+  | 'keepa_research'  // API-based research using Keepa Best Sellers (no browser required)
   | 'keepa_lookup'
   | 'autods_upload'
   | 'autods_publish'

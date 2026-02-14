@@ -20,7 +20,12 @@ import { supabase } from '@/lib/supabase'
 import { CASSINI_THRESHOLDS } from '@/lib/research/cassini-optimizer'
 
 export interface ResearchPipelineOptions {
-  // ZIK search options
+  // Research source selection
+  // - 'zik': Browser-based ZIK Analytics scraping (requires browser)
+  // - 'keepa': API-based Keepa Best Sellers (no browser required, scalable)
+  researchSource?: 'zik' | 'keepa'
+
+  // ZIK/Keepa search options
   query?: string
   category?: string
   minSold?: number
@@ -114,32 +119,58 @@ export async function startResearchPipeline(
     // Save initial pipeline state
     await savePipelineState(pipelineId, progress)
 
+    // Determine research source (default to keepa for scalability - no browser required)
+    const researchSource = options.researchSource || 'keepa'
+
     // Check rate limits before starting
-    const zikLimitStatus = await rateLimiter.check('zik', 'search')
-    if (!zikLimitStatus.allowed) {
-      return {
-        success: false,
-        pipelineId,
-        progress,
-        error: `ZIK rate limit exceeded. Retry after ${zikLimitStatus.retryAfterMs}ms`,
+    if (researchSource === 'zik') {
+      const zikLimitStatus = await rateLimiter.check('zik', 'search')
+      if (!zikLimitStatus.allowed) {
+        return {
+          success: false,
+          pipelineId,
+          progress,
+          error: `ZIK rate limit exceeded. Retry after ${zikLimitStatus.retryAfterMs}ms`,
+        }
       }
     }
 
-    // Create the ZIK research job
-    const researchJob = await createJob('zik_research', {
-      pipelineId,
-      filters: {
-        query: options.query,
-        category: options.category,
-        minSold: options.minSold || 5,
-        maxSold: options.maxSold,
-        minPrice: options.minPrice,
-        maxPrice: options.maxPrice,
-        dateRange: options.dateRange || '30',
-      },
-      maxResults: options.maxProducts || 50,
-      userId: options.userId,
-    })
+    // Create the research job based on source
+    let researchJob
+    if (researchSource === 'keepa') {
+      // Keepa-based research (no browser required, API-only)
+      console.log(`[Pipeline ${pipelineId}] Using Keepa API research (no browser required)`)
+      researchJob = await createJob('keepa_research', {
+        pipelineId,
+        categoryName: options.category,
+        filters: {
+          category: options.category,
+          minSold: options.minSold || 5,
+          maxSold: options.maxSold,
+          minPrice: options.minPrice,
+          maxPrice: options.maxPrice,
+        },
+        maxResults: options.maxProducts || 50,
+        userId: options.userId,
+      })
+    } else {
+      // ZIK-based research (requires browser)
+      console.log(`[Pipeline ${pipelineId}] Using ZIK browser research`)
+      researchJob = await createJob('zik_research', {
+        pipelineId,
+        filters: {
+          query: options.query,
+          category: options.category,
+          minSold: options.minSold || 5,
+          maxSold: options.maxSold,
+          minPrice: options.minPrice,
+          maxPrice: options.maxPrice,
+          dateRange: options.dateRange || '30',
+        },
+        maxResults: options.maxProducts || 50,
+        userId: options.userId,
+      })
+    }
 
     progress.jobIds.push(researchJob.id)
     progress.stage = 'researching'

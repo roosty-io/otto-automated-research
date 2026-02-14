@@ -68,6 +68,196 @@ registerJobHandler('zik_research', async (job: Job): Promise<JobResult> => {
 })
 
 /**
+ * Keepa Research Job Handler (No Browser Required)
+ *
+ * Alternative to ZIK research that uses Keepa's Best Sellers API
+ * to find trending Amazon products for eBay arbitrage.
+ *
+ * Payload:
+ * {
+ *   categoryId?: number,    // Keepa category ID (optional, uses Home & Garden default)
+ *   categoryName?: string,  // Human-readable name for logging
+ *   maxResults?: number,
+ *   domain?: string,
+ *   pipelineId?: string
+ * }
+ */
+registerJobHandler('keepa_research', async (job: Job): Promise<JobResult> => {
+  const {
+    categoryId,
+    categoryName = 'General',
+    maxResults = 50,
+    domain = 'US',
+    pipelineId,
+    filters,
+  } = job.payload
+
+  // Category mapping for common categories
+  const categoryMap: Record<string, number> = {
+    'Home & Garden': 1055398,
+    'Kitchen': 284507,
+    'Tools': 228013,
+    'Electronics': 172282,
+    'Sports': 3375251,
+    'Toys': 165793011,
+    'Beauty': 3760911,
+    'Health': 3760901,
+    'Pet Supplies': 2619533011,
+    'Office': 1064954,
+    'Automotive': 15684181,
+  }
+
+  // Get category ID from name or use provided ID
+  const targetCategoryId = categoryId ||
+    categoryMap[filters?.category || categoryName] ||
+    categoryMap['Home & Garden']
+
+  console.log(`[Keepa Research] Starting research for category: ${categoryName} (${targetCategoryId})`)
+
+  try {
+    const keepa = getKeepaClient()
+
+    // Get best sellers for the category
+    const bestSellers = await keepa.getBestSellers(targetCategoryId, {
+      domain: domain as any,
+      range: Math.min(maxResults * 2, 500), // Get extra to filter
+    })
+
+    if (!bestSellers || bestSellers.length === 0) {
+      if (pipelineId) {
+        await continuePipeline(pipelineId, 'research', { error: 'No best sellers found' })
+      }
+      return { success: false, error: 'No best sellers found for category' }
+    }
+
+    console.log(`[Keepa Research] Found ${bestSellers.length} best sellers, fetching details...`)
+
+    // Get detailed product info for top items
+    const asins = bestSellers.slice(0, maxResults).map(bs => bs.asin)
+    const products = await keepa.getProducts(asins, {
+      domain: domain as any,
+      stats: 90,
+      buybox: true,
+      rating: true,
+    })
+
+    console.log(`[Keepa Research] Retrieved details for ${products.length} products`)
+
+    // Filter for products suitable for eBay arbitrage
+    const eligibleProducts = products.filter(p => {
+      // Must have buybox price
+      if (!p.buyBoxPrice && !p.amazonPrice) return false
+      // Reasonable price range for dropshipping ($10-200)
+      const price = p.buyBoxPrice || p.amazonPrice || 0
+      if (price < 10 || price > 200) return false
+      // Good rating
+      if (p.rating && p.rating < 3.5) return false
+      // Not adult content
+      if (p.isAdult) return false
+      return true
+    })
+
+    console.log(`[Keepa Research] ${eligibleProducts.length} products eligible for arbitrage`)
+
+    // Save to raw_products
+    const { savedIds, savedCount } = await saveKeepaResearchProducts(eligibleProducts, categoryName, domain)
+
+    // Continue pipeline if this is part of one
+    if (pipelineId) {
+      await continuePipeline(pipelineId, 'research', { productIds: savedIds })
+    }
+
+    return {
+      success: true,
+      data: {
+        category: categoryName,
+        categoryId: targetCategoryId,
+        bestSellersFound: bestSellers.length,
+        detailsFetched: products.length,
+        eligible: eligibleProducts.length,
+        saved: savedCount,
+        productIds: savedIds,
+        tokensRemaining: keepa.getTokensRemaining(),
+      },
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    console.error(`[Keepa Research] Error:`, error)
+
+    if (pipelineId) {
+      await continuePipeline(pipelineId, 'research', { error: errorMessage })
+    }
+
+    return { success: false, error: errorMessage }
+  }
+})
+
+/**
+ * Save Keepa research products to staging
+ */
+async function saveKeepaResearchProducts(
+  products: any[],
+  category: string,
+  domain: string
+): Promise<{ savedIds: string[]; savedCount: number }> {
+  const savedIds: string[] = []
+  const batchId = `keepa_research_${Date.now()}`
+
+  for (const product of products) {
+    try {
+      // Check if already exists
+      const { data: existing } = await supabase
+        .from('raw_products')
+        .select('id')
+        .eq('asin', product.asin)
+        .single()
+
+      if (existing) {
+        // Update existing
+        await supabase
+          .from('raw_products')
+          .update({
+            keepa_data: product.rawData,
+            amazon_price: product.buyBoxPrice || product.amazonPrice,
+            sales_rank: product.salesRank,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', existing.id)
+        savedIds.push(existing.id)
+      } else {
+        // Insert new
+        const { data: inserted, error } = await supabase
+          .from('raw_products')
+          .insert({
+            asin: product.asin,
+            title: product.title,
+            brand: product.brand,
+            amazon_url: `https://www.amazon.com/dp/${product.asin}`,
+            amazon_price: product.buyBoxPrice || product.amazonPrice,
+            sales_rank: product.salesRank,
+            review_count: product.reviewCount,
+            rating: product.rating,
+            keepa_data: product.rawData,
+            source: 'keepa_research',
+            source_batch_id: batchId,
+            category: category,
+          })
+          .select('id')
+          .single()
+
+        if (!error && inserted) {
+          savedIds.push(inserted.id)
+        }
+      }
+    } catch {
+      // Ignore individual errors
+    }
+  }
+
+  return { savedIds, savedCount: savedIds.length }
+}
+
+/**
  * Keepa Lookup Job Handler
  *
  * Payload:

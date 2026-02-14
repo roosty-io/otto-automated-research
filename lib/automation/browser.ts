@@ -1,6 +1,12 @@
 /**
  * Browser Pool for Puppeteer automation
  *
+ * Supports both local browsers and remote browser services (Browserless.io, etc.)
+ *
+ * Environment variables:
+ * - BROWSER_WS_ENDPOINT: WebSocket URL for remote browser service (e.g., wss://chrome.browserless.io?token=XXX)
+ * - PUPPETEER_EXECUTABLE_PATH: Path to local Chrome binary (for local mode)
+ *
  * Uses dynamic imports to avoid webpack bundling issues with puppeteer-extra
  */
 
@@ -8,9 +14,27 @@ import type { Browser, Page, PuppeteerLaunchOptions } from 'puppeteer-core'
 
 // Lazy-loaded puppeteer instance
 let puppeteerInstance: any = null
+let puppeteerCore: any = null
 let stealthInitialized = false
 
+// Check if we're using remote browser
+function isRemoteBrowser(): boolean {
+  return !!process.env.BROWSER_WS_ENDPOINT
+}
+
+async function getPuppeteerCore() {
+  if (!puppeteerCore) {
+    puppeteerCore = await import('puppeteer-core')
+  }
+  return puppeteerCore.default || puppeteerCore
+}
+
 async function getPuppeteer() {
+  // For remote browsers, use puppeteer-core directly (stealth not needed/supported)
+  if (isRemoteBrowser()) {
+    return getPuppeteerCore()
+  }
+
   if (!puppeteerInstance) {
     // Dynamic import to avoid webpack bundling issues
     const puppeteerExtra = await import('puppeteer-extra')
@@ -138,10 +162,44 @@ class BrowserPool {
 
     // Create a new browser
     const id = this.generateId()
-    console.log(`[BrowserPool] Launching new browser: ${id}`)
-
     const puppeteer = await getPuppeteer()
-    const browser = await puppeteer.launch(this.getLaunchOptions())
+    let browser: Browser
+
+    // Check for remote browser service
+    const wsEndpoint = process.env.BROWSER_WS_ENDPOINT
+    if (wsEndpoint) {
+      console.log(`[BrowserPool] Connecting to remote browser: ${id}`)
+      console.log(`[BrowserPool] WebSocket endpoint: ${wsEndpoint.substring(0, 50)}...`)
+
+      try {
+        browser = await puppeteer.connect({
+          browserWSEndpoint: wsEndpoint,
+          defaultViewport: {
+            width: 1920,
+            height: 1080,
+          },
+        })
+      } catch (connectError) {
+        console.error(`[BrowserPool] Failed to connect to remote browser:`, connectError)
+        throw new Error(
+          `Failed to connect to remote browser service. ` +
+          `Check BROWSER_WS_ENDPOINT is valid. Error: ${connectError instanceof Error ? connectError.message : 'Unknown'}`
+        )
+      }
+    } else {
+      // Check if local browser is available
+      const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH
+      if (!executablePath) {
+        throw new Error(
+          `No browser configured. For production/scale, set BROWSER_WS_ENDPOINT to a remote browser service:\n` +
+          `  - Browserless.io: wss://chrome.browserless.io?token=YOUR_TOKEN\n` +
+          `  - Bright Data: wss://brd.superproxy.io:9222\n` +
+          `For local development, set PUPPETEER_EXECUTABLE_PATH to your Chrome binary path.`
+        )
+      }
+      console.log(`[BrowserPool] Launching local browser: ${id}`)
+      browser = await puppeteer.launch(this.getLaunchOptions())
+    }
 
     this.browsers.set(id, {
       browser,
