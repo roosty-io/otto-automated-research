@@ -95,9 +95,11 @@ export async function POST(request: Request) {
     const keepa = getKeepaClient()
 
     // Get best sellers list
+    // Note: Keepa 'range' is days of history (0, 30, 90, 180), not result count
+    // The API returns all bestsellers for the category, we slice to 'limit' after
     const bestSellers = await keepa.getBestSellers(categoryId, {
       domain: domain as AmazonDomain,
-      range: Math.min(limit, 10000),
+      range: 30, // 30 days of bestseller history
     })
 
     let products = null

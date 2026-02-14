@@ -118,9 +118,10 @@ registerJobHandler('keepa_research', async (job: Job): Promise<JobResult> => {
     const keepa = getKeepaClient()
 
     // Get best sellers for the category
+    // Note: Keepa 'range' is days of history (0, 30, 90, 180), not result count
     const bestSellers = await keepa.getBestSellers(targetCategoryId, {
       domain: domain as any,
-      range: Math.min(maxResults * 2, 500), // Get extra to filter
+      range: 30, // 30 days of bestseller history
     })
 
     if (!bestSellers || bestSellers.length === 0) {

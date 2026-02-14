@@ -14,31 +14,41 @@
 // Keepa API configuration
 const KEEPA_API_BASE = 'https://api.keepa.com'
 
-// Create proxy-aware fetch function for containerized environments
+// Get fetch function with proxy support for containerized environments
 function getProxyFetch(): typeof fetch {
   const proxyUrl = process.env.GLOBAL_AGENT_HTTP_PROXY ||
     process.env.https_proxy ||
     process.env.HTTPS_PROXY
 
-  if (!proxyUrl || typeof window !== 'undefined') {
-    return fetch
+  // In containerized environments, we need the proxy for DNS resolution
+  if (proxyUrl && typeof window === 'undefined') {
+    try {
+      const { ProxyAgent, fetch: undiciFetch } = require('undici')
+      const proxyAgent = new ProxyAgent({
+        uri: proxyUrl,
+        requestTls: {
+          rejectUnauthorized: false
+        }
+      })
+      console.log('[Keepa] Using proxy for API calls')
+
+      return ((input: RequestInfo | URL, init?: RequestInit) => {
+        return undiciFetch(input as any, {
+          ...init,
+          dispatcher: proxyAgent,
+          headers: {
+            'Accept-Encoding': 'gzip, deflate',
+            'Accept': 'application/json',
+            ...(init?.headers as Record<string, string> || {})
+          }
+        } as any)
+      }) as typeof fetch
+    } catch (e) {
+      console.warn('[Keepa] Failed to create proxy fetch:', e)
+    }
   }
 
-  try {
-    const { ProxyAgent, fetch: undiciFetch } = require('undici')
-    const proxyAgent = new ProxyAgent(proxyUrl)
-    console.log('[Keepa] Using proxy for API calls')
-
-    return ((input: RequestInfo | URL, init?: RequestInit) => {
-      return undiciFetch(input as any, {
-        ...init,
-        dispatcher: proxyAgent,
-      } as any)
-    }) as typeof fetch
-  } catch (e) {
-    console.warn('[Keepa] Failed to create proxy fetch, using default:', e)
-    return fetch
-  }
+  return fetch
 }
 
 // Amazon domain IDs
@@ -314,9 +324,20 @@ class KeepaClient {
 
     // Use proxy-aware fetch for containerized environments
     const proxyFetch = getProxyFetch()
-    const response = await proxyFetch(url.toString())
+    const requestUrl = url.toString()
+    console.log(`[Keepa] Requesting: ${endpoint}`)
+
+    const response = await proxyFetch(requestUrl)
 
     if (!response.ok) {
+      // Try to get error body for debugging
+      let errorBody = ''
+      try {
+        errorBody = await response.text()
+        console.log(`[Keepa] Error response body: ${errorBody.substring(0, 500)}`)
+      } catch (e) {
+        // ignore
+      }
       throw new Error(`Keepa API error: ${response.status} ${response.statusText}`)
     }
 
@@ -378,15 +399,30 @@ class KeepaClient {
     const domain = options.domain || 'US'
     const domainId = AMAZON_DOMAINS[domain]
 
-    const response = await this.request<KeepaProduct>('/product', {
+    // Build params - only include non-zero values to avoid invalid parameter errors
+    const params: Record<string, string | number | boolean> = {
       domain: domainId,
       asin: asinList.join(','),
-      stats: options.stats ?? 180,
-      history: options.history ? 1 : 0,
-      buybox: options.buybox ? 1 : 0,
-      offers: options.offers ?? 0,
-      rating: options.rating ? 1 : 0,
-    })
+    }
+
+    // Only add optional params if they have meaningful values
+    if (options.stats !== undefined && options.stats > 0) {
+      params.stats = options.stats
+    }
+    if (options.history) {
+      params.history = 1
+    }
+    if (options.buybox) {
+      params.buybox = 1
+    }
+    if (options.offers && options.offers > 0) {
+      params.offers = options.offers
+    }
+    if (options.rating) {
+      params.rating = 1
+    }
+
+    const response = await this.request<KeepaProduct>('/product', params)
 
     if (!response.products) {
       return []
@@ -427,19 +463,52 @@ class KeepaClient {
     categoryId: number,
     options: {
       domain?: AmazonDomain
-      range?: number // Number of best sellers (max 10000)
+      range?: 0 | 30 | 90 | 180 // Days of best seller history (valid: 0, 30, 90, 180)
     } = {}
   ): Promise<KeepaBestSeller[]> {
     const domain = options.domain || 'US'
     const domainId = AMAZON_DOMAINS[domain]
 
+    // Keepa bestsellers range must be one of: 0, 30, 90, 180
+    const validRange = options.range ?? 30
+
     const response = await this.request<never>('/bestsellers', {
       domain: domainId,
       category: categoryId,
-      range: options.range ?? 100,
+      range: validRange,
     })
 
-    return response.bestSellersList || []
+    // Debug: log the raw response structure
+    console.log('[Keepa] bestSellersList type:', typeof response.bestSellersList)
+    if (response.bestSellersList) {
+      const sample = Array.isArray(response.bestSellersList)
+        ? response.bestSellersList.slice(0, 2)
+        : Object.entries(response.bestSellersList).slice(0, 2)
+      console.log('[Keepa] bestSellersList sample:', JSON.stringify(sample))
+    }
+
+    // bestSellersList can be an object keyed by category ID or an array
+    const bsList = response.bestSellersList
+    if (!bsList) {
+      return []
+    }
+
+    // If it's an object (keyed by category), extract the array for our category
+    if (!Array.isArray(bsList)) {
+      const categoryData = (bsList as Record<number, KeepaBestSeller[]>)[categoryId]
+      if (Array.isArray(categoryData)) {
+        return categoryData
+      }
+      // Try to get any available array
+      const values = Object.values(bsList)
+      if (values.length > 0 && Array.isArray(values[0])) {
+        return values[0] as KeepaBestSeller[]
+      }
+      console.log('[Keepa] Unexpected bestSellersList format:', typeof bsList)
+      return []
+    }
+
+    return bsList
   }
 
   /**
