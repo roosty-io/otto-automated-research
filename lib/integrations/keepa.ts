@@ -487,15 +487,32 @@ class KeepaClient {
       console.log('[Keepa] bestSellersList sample:', JSON.stringify(sample))
     }
 
-    // bestSellersList can be an object keyed by category ID or an array
-    const bsList = response.bestSellersList
+    // bestSellersList format from Keepa: { "asinList": ["ASIN1", "ASIN2", ...] }
+    const bsList = response.bestSellersList as any
     if (!bsList) {
       return []
     }
 
-    // If it's an object (keyed by category), extract the array for our category
-    if (!Array.isArray(bsList)) {
-      const categoryData = (bsList as Record<number, KeepaBestSeller[]>)[categoryId]
+    // Handle the { asinList: string[] } format
+    if (bsList.asinList && Array.isArray(bsList.asinList)) {
+      // Convert string ASINs to KeepaBestSeller objects
+      return bsList.asinList.map((asin: string, index: number) => ({
+        asin,
+        domainId: domainId,
+        lastUpdate: Date.now(),
+        categoryId: categoryId,
+        rank: index + 1,
+      }))
+    }
+
+    // If it's already an array of objects with asin property
+    if (Array.isArray(bsList)) {
+      return bsList
+    }
+
+    // If it's an object keyed by category ID
+    if (typeof bsList === 'object') {
+      const categoryData = bsList[categoryId]
       if (Array.isArray(categoryData)) {
         return categoryData
       }
@@ -504,11 +521,10 @@ class KeepaClient {
       if (values.length > 0 && Array.isArray(values[0])) {
         return values[0] as KeepaBestSeller[]
       }
-      console.log('[Keepa] Unexpected bestSellersList format:', typeof bsList)
-      return []
     }
 
-    return bsList
+    console.log('[Keepa] Unexpected bestSellersList format:', typeof bsList)
+    return []
   }
 
   /**
