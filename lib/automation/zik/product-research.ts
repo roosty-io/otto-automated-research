@@ -134,27 +134,82 @@ export async function searchZikProducts(
     await applyFilters(page, filters)
 
     // Click search
-    await safeClick(page, SELECTORS.searchButton)
+    const searchClicked = await safeClick(page, SELECTORS.searchButton)
+    if (!searchClicked) {
+      // Try alternative: press Enter in search input
+      await page.keyboard.press('Enter')
+    }
 
-    // Wait for results
-    await waitForResults(page)
+    // Wait for results with improved error handling
+    const initialWait = await waitForResults(page)
+    if (initialWait.error) {
+      console.warn(`[ZIK Research] Initial results wait failed: ${initialWait.error}`)
+      // Take screenshot for debugging
+      await takeScreenshot(page, 'zik_initial_wait_error')
+
+      return {
+        success: false,
+        query: filters.query || '',
+        filters,
+        totalResults: 0,
+        products: [],
+        hasMorePages: false,
+        error: initialWait.error,
+      }
+    }
+
+    if (!initialWait.hasResults) {
+      console.log('[ZIK Research] No results found for query')
+      return {
+        success: true,
+        query: filters.query || '',
+        filters,
+        totalResults: 0,
+        products: [],
+        hasMorePages: false,
+      }
+    }
 
     // Scrape results across pages
     const products: ZikProductResult[] = []
     let currentPage = 1
     let hasMorePages = true
+    let consecutiveErrors = 0
+    const MAX_CONSECUTIVE_ERRORS = 2
 
     while (hasMorePages && products.length < maxResults && currentPage <= maxPages) {
       console.log(`[ZIK Research] Scraping page ${currentPage}...`)
 
-      const pageProducts = await scrapeResultsPage(page)
-      products.push(...pageProducts)
+      try {
+        const pageProducts = await scrapeResultsPage(page)
+        if (pageProducts.length > 0) {
+          products.push(...pageProducts)
+          consecutiveErrors = 0
+        } else {
+          consecutiveErrors++
+          console.warn(`[ZIK Research] No products extracted from page ${currentPage}`)
+        }
+      } catch (scrapeError) {
+        consecutiveErrors++
+        console.warn(`[ZIK Research] Error scraping page ${currentPage}:`, scrapeError)
+      }
 
-      // Check for next page
-      hasMorePages = await goToNextPage(page)
+      // Stop if too many consecutive errors
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        console.warn('[ZIK Research] Too many consecutive scraping errors, stopping pagination')
+        break
+      }
+
+      // Check for next page with improved navigation
+      const nextPageResult = await goToNextPage(page)
+      hasMorePages = nextPageResult.success
       if (hasMorePages) {
         currentPage++
-        await waitForResults(page)
+        const pageWait = await waitForResults(page, { retries: 1 })
+        if (pageWait.error || !pageWait.hasResults) {
+          console.warn(`[ZIK Research] Failed to load page ${currentPage}, stopping pagination`)
+          break
+        }
       }
     }
 
@@ -225,24 +280,89 @@ async function applyFilters(page: Page, filters: ZikSearchFilters): Promise<void
 }
 
 /**
- * Wait for results to load
+ * Wait for results to load with improved stability
  */
-async function waitForResults(page: Page): Promise<void> {
-  // Wait for loading to disappear
-  try {
-    await page.waitForSelector(SELECTORS.loading, { hidden: true, timeout: 5000 })
-  } catch {
-    // Loading indicator might not exist
+async function waitForResults(page: Page, options: { retries?: number } = {}): Promise<{ hasResults: boolean; error?: string }> {
+  const maxRetries = options.retries ?? 2
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      // Wait for loading to disappear with longer timeout
+      try {
+        await page.waitForSelector(SELECTORS.loading, { hidden: true, timeout: 10000 })
+      } catch {
+        // Loading indicator might not exist or already gone
+      }
+
+      // Check for error pages or login redirects first
+      const currentUrl = page.url()
+      if (currentUrl.includes('/login') || currentUrl.includes('/signin')) {
+        return { hasResults: false, error: 'Session expired - redirected to login' }
+      }
+
+      // Use Promise.race with a timeout fallback to handle edge cases
+      const result = await Promise.race([
+        (async () => {
+          const table = await page.$(SELECTORS.resultsTable)
+          if (table) return { found: 'results' as const }
+          return null
+        })(),
+        (async () => {
+          const noResults = await page.$(SELECTORS.noResults)
+          if (noResults) return { found: 'empty' as const }
+          return null
+        })(),
+        (async () => {
+          // Poll for either element to appear
+          for (let i = 0; i < 30; i++) { // 30 * 500ms = 15s max
+            const table = await page.$(SELECTORS.resultsTable)
+            if (table) return { found: 'results' as const }
+
+            const noResults = await page.$(SELECTORS.noResults)
+            if (noResults) return { found: 'empty' as const }
+
+            await sleep(500)
+          }
+          return { found: 'timeout' as const }
+        })(),
+      ])
+
+      if (result?.found === 'results') {
+        // Wait for rows to populate (check for actual data)
+        await sleep(1500)
+        const rows = await page.$$(SELECTORS.resultRow)
+        if (rows.length > 0) {
+          return { hasResults: true }
+        }
+        // Table exists but no rows - wait a bit more
+        await sleep(1000)
+        const rowsRetry = await page.$$(SELECTORS.resultRow)
+        return { hasResults: rowsRetry.length > 0 }
+      }
+
+      if (result?.found === 'empty') {
+        return { hasResults: false }
+      }
+
+      // Timeout - retry if we have attempts left
+      if (attempt < maxRetries) {
+        console.log(`[ZIK Research] waitForResults timeout, retrying (${attempt + 1}/${maxRetries})...`)
+        await sleep(2000)
+        continue
+      }
+
+      return { hasResults: false, error: 'Timeout waiting for results' }
+    } catch (error) {
+      if (attempt < maxRetries) {
+        console.log(`[ZIK Research] waitForResults error, retrying (${attempt + 1}/${maxRetries}):`, error)
+        await sleep(2000)
+        continue
+      }
+      return { hasResults: false, error: error instanceof Error ? error.message : 'Unknown error' }
+    }
   }
 
-  // Wait for results table or no results message
-  await Promise.race([
-    waitForSelector(page, SELECTORS.resultsTable, { timeout: 15000 }),
-    waitForSelector(page, SELECTORS.noResults, { timeout: 15000 }),
-  ])
-
-  // Extra wait for data to populate
-  await sleep(1000)
+  return { hasResults: false, error: 'Max retries exceeded' }
 }
 
 /**
@@ -352,27 +472,70 @@ function parsePrice(priceStr: string): number | null {
 }
 
 /**
- * Navigate to next page of results
+ * Navigate to next page of results with proper navigation waiting
  */
-async function goToNextPage(page: Page): Promise<boolean> {
-  const nextBtn = await page.$(SELECTORS.nextPageBtn)
-  if (!nextBtn) {
-    return false
+async function goToNextPage(page: Page): Promise<{ success: boolean; error?: string }> {
+  try {
+    const nextBtn = await page.$(SELECTORS.nextPageBtn)
+    if (!nextBtn) {
+      return { success: false }
+    }
+
+    // Check if button is disabled
+    const isDisabled = await nextBtn.evaluate((el) => {
+      return el.hasAttribute('disabled') ||
+        el.classList.contains('disabled') ||
+        el.getAttribute('aria-disabled') === 'true' ||
+        (el as HTMLButtonElement).disabled === true
+    })
+
+    if (isDisabled) {
+      return { success: false }
+    }
+
+    // Scroll button into view first
+    await nextBtn.evaluate((el) => el.scrollIntoView({ block: 'center' }))
+    await sleep(300)
+
+    // Get current URL or page state to detect navigation
+    const currentUrl = page.url()
+
+    // Click with navigation wait
+    try {
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => null),
+        nextBtn.click(),
+      ])
+    } catch (navError) {
+      // Navigation might not trigger a full page load (SPA behavior)
+      // Wait for DOM changes instead
+      await sleep(1500)
+    }
+
+    // Verify page changed or content updated
+    const newUrl = page.url()
+    if (newUrl !== currentUrl) {
+      // URL changed, navigation succeeded
+      return { success: true }
+    }
+
+    // For SPA-style pagination, wait for loading indicator to appear and disappear
+    try {
+      const loadingVisible = await page.$(SELECTORS.loading)
+      if (loadingVisible) {
+        await page.waitForSelector(SELECTORS.loading, { hidden: true, timeout: 10000 })
+      }
+    } catch {
+      // Loading indicator might not exist
+    }
+
+    // Give the page time to update content
+    await sleep(1000)
+    return { success: true }
+  } catch (error) {
+    console.warn('[ZIK Research] goToNextPage error:', error)
+    return { success: false, error: error instanceof Error ? error.message : 'Navigation failed' }
   }
-
-  // Check if button is disabled
-  const isDisabled = await nextBtn.evaluate((el) => {
-    return el.hasAttribute('disabled') ||
-      el.classList.contains('disabled') ||
-      el.getAttribute('aria-disabled') === 'true'
-  })
-
-  if (isDisabled) {
-    return false
-  }
-
-  await nextBtn.click()
-  return true
 }
 
 /**

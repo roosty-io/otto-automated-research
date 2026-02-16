@@ -303,6 +303,13 @@ class KeepaClient {
   private tokensRemaining: number = 0
   private refillRate: number = 0
   private lastTokenUpdate: number = 0
+  private requestQueue: Array<() => Promise<void>> = []
+  private isProcessingQueue: boolean = false
+
+  // Retry configuration
+  private static readonly MAX_RETRIES = 3
+  private static readonly RETRY_DELAYS = [1000, 2000, 4000] // Exponential backoff
+  private static readonly MIN_TOKENS_THRESHOLD = 5 // Minimum tokens before waiting for refill
 
   constructor(apiKey?: string) {
     this.apiKey = apiKey || process.env.KEEPA_API_KEY || ''
@@ -311,10 +318,38 @@ class KeepaClient {
     }
   }
 
+  /**
+   * Check if we should wait for token refill
+   */
+  private async waitForTokensIfNeeded(requiredTokens: number = 1): Promise<void> {
+    // Estimate tokens based on last update
+    const timeSinceUpdate = Date.now() - this.lastTokenUpdate
+    const estimatedRefill = Math.floor((timeSinceUpdate / 60000) * this.refillRate)
+    const estimatedTokens = Math.min(this.tokensRemaining + estimatedRefill, 100)
+
+    if (estimatedTokens < requiredTokens && this.refillRate > 0) {
+      const tokensNeeded = requiredTokens - estimatedTokens
+      const waitTimeMs = Math.ceil((tokensNeeded / this.refillRate) * 60000) + 1000 // Add 1s buffer
+
+      if (waitTimeMs > 0 && waitTimeMs < 300000) { // Cap at 5 minutes
+        console.log(`[Keepa] Low tokens (${estimatedTokens}), waiting ${Math.round(waitTimeMs / 1000)}s for refill...`)
+        await new Promise(resolve => setTimeout(resolve, waitTimeMs))
+      }
+    }
+  }
+
   private async request<T>(
     endpoint: string,
-    params: Record<string, string | number | boolean>
+    params: Record<string, string | number | boolean>,
+    options: { retryCount?: number } = {}
   ): Promise<KeepaApiResponse<T>> {
+    const retryCount = options.retryCount ?? 0
+
+    // Check token availability before making request (skip for /token endpoint)
+    if (endpoint !== '/token' && this.lastTokenUpdate > 0) {
+      await this.waitForTokensIfNeeded()
+    }
+
     const url = new URL(`${KEEPA_API_BASE}${endpoint}`)
     url.searchParams.set('key', this.apiKey)
 
@@ -325,34 +360,90 @@ class KeepaClient {
     // Use proxy-aware fetch for containerized environments
     const proxyFetch = getProxyFetch()
     const requestUrl = url.toString()
-    console.log(`[Keepa] Requesting: ${endpoint}`)
+    console.log(`[Keepa] Requesting: ${endpoint}${retryCount > 0 ? ` (retry ${retryCount})` : ''}`)
 
-    const response = await proxyFetch(requestUrl)
+    try {
+      const response = await proxyFetch(requestUrl)
 
-    if (!response.ok) {
-      // Try to get error body for debugging
-      let errorBody = ''
-      try {
-        errorBody = await response.text()
-        console.log(`[Keepa] Error response body: ${errorBody.substring(0, 500)}`)
-      } catch (e) {
-        // ignore
+      // Handle rate limiting (429 Too Many Requests)
+      if (response.status === 429) {
+        if (retryCount < KeepaClient.MAX_RETRIES) {
+          const retryAfter = parseInt(response.headers.get('Retry-After') || '60', 10)
+          const waitTime = Math.min(retryAfter * 1000, 120000) // Cap at 2 minutes
+          console.log(`[Keepa] Rate limited, waiting ${waitTime / 1000}s before retry...`)
+          await new Promise(resolve => setTimeout(resolve, waitTime))
+          return this.request<T>(endpoint, params, { retryCount: retryCount + 1 })
+        }
+        throw new Error('Keepa API rate limit exceeded after retries')
       }
-      throw new Error(`Keepa API error: ${response.status} ${response.statusText}`)
+
+      // Handle server errors with retry
+      if (response.status >= 500 && retryCount < KeepaClient.MAX_RETRIES) {
+        const delay = KeepaClient.RETRY_DELAYS[retryCount] || 4000
+        console.log(`[Keepa] Server error ${response.status}, retrying in ${delay}ms...`)
+        await new Promise(resolve => setTimeout(resolve, delay))
+        return this.request<T>(endpoint, params, { retryCount: retryCount + 1 })
+      }
+
+      if (!response.ok) {
+        // Try to get error body for debugging
+        let errorBody = ''
+        try {
+          errorBody = await response.text()
+          console.log(`[Keepa] Error response body: ${errorBody.substring(0, 500)}`)
+        } catch (e) {
+          // ignore
+        }
+        throw new Error(`Keepa API error: ${response.status} ${response.statusText}`)
+      }
+
+      let data: KeepaApiResponse<T>
+      try {
+        data = await response.json() as KeepaApiResponse<T>
+      } catch (parseError) {
+        // JSON parse error - retry if possible
+        if (retryCount < KeepaClient.MAX_RETRIES) {
+          const delay = KeepaClient.RETRY_DELAYS[retryCount] || 4000
+          console.log(`[Keepa] JSON parse error, retrying in ${delay}ms...`)
+          await new Promise(resolve => setTimeout(resolve, delay))
+          return this.request<T>(endpoint, params, { retryCount: retryCount + 1 })
+        }
+        throw new Error(`Keepa API response parse error: ${parseError instanceof Error ? parseError.message : 'Invalid JSON'}`)
+      }
+
+      // Update token tracking
+      this.tokensRemaining = data.tokensLeft ?? this.tokensRemaining
+      this.refillRate = data.refillRate ?? this.refillRate
+      this.lastTokenUpdate = Date.now()
+
+      // Log token status for monitoring
+      if (this.tokensRemaining < 10) {
+        console.warn(`[Keepa] Low tokens remaining: ${this.tokensRemaining}`)
+      }
+
+      if (data.error) {
+        // Check if error is retryable
+        const retryableErrors = ['TEMPORARY_ERROR', 'TIMEOUT', 'SERVICE_UNAVAILABLE']
+        if (retryableErrors.includes(data.error.type) && retryCount < KeepaClient.MAX_RETRIES) {
+          const delay = KeepaClient.RETRY_DELAYS[retryCount] || 4000
+          console.log(`[Keepa] Retryable error: ${data.error.type}, retrying in ${delay}ms...`)
+          await new Promise(resolve => setTimeout(resolve, delay))
+          return this.request<T>(endpoint, params, { retryCount: retryCount + 1 })
+        }
+        throw new Error(`Keepa API error: ${data.error.type} - ${data.error.message}`)
+      }
+
+      return data
+    } catch (error) {
+      // Handle network errors with retry
+      if (error instanceof TypeError && error.message.includes('fetch') && retryCount < KeepaClient.MAX_RETRIES) {
+        const delay = KeepaClient.RETRY_DELAYS[retryCount] || 4000
+        console.log(`[Keepa] Network error, retrying in ${delay}ms...`)
+        await new Promise(resolve => setTimeout(resolve, delay))
+        return this.request<T>(endpoint, params, { retryCount: retryCount + 1 })
+      }
+      throw error
     }
-
-    const data = await response.json() as KeepaApiResponse<T>
-
-    // Update token tracking
-    this.tokensRemaining = data.tokensLeft
-    this.refillRate = data.refillRate
-    this.lastTokenUpdate = Date.now()
-
-    if (data.error) {
-      throw new Error(`Keepa API error: ${data.error.type} - ${data.error.message}`)
-    }
-
-    return data
   }
 
   /**
@@ -478,53 +569,164 @@ class KeepaClient {
       range: validRange,
     })
 
-    // Debug: log the raw response structure
-    console.log('[Keepa] bestSellersList type:', typeof response.bestSellersList)
-    if (response.bestSellersList) {
-      const sample = Array.isArray(response.bestSellersList)
-        ? response.bestSellersList.slice(0, 2)
-        : Object.entries(response.bestSellersList).slice(0, 2)
-      console.log('[Keepa] bestSellersList sample:', JSON.stringify(sample))
+    // Debug: log the raw response structure (only in development)
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[Keepa] bestSellersList type:', typeof response.bestSellersList)
+      if (response.bestSellersList) {
+        const sample = Array.isArray(response.bestSellersList)
+          ? response.bestSellersList.slice(0, 2)
+          : typeof response.bestSellersList === 'object'
+            ? Object.entries(response.bestSellersList).slice(0, 2)
+            : response.bestSellersList
+        console.log('[Keepa] bestSellersList sample:', JSON.stringify(sample, null, 2))
+      }
     }
 
-    // bestSellersList format from Keepa: { "asinList": ["ASIN1", "ASIN2", ...] }
-    const bsList = response.bestSellersList as any
-    if (!bsList) {
+    return this.parseBestSellersList(response.bestSellersList, domainId, categoryId)
+  }
+
+  /**
+   * Parse best sellers list from various Keepa response formats
+   * Handles all known edge cases in Keepa API responses
+   */
+  private parseBestSellersList(
+    bsList: any,
+    domainId: number,
+    categoryId: number
+  ): KeepaBestSeller[] {
+    // Handle null/undefined
+    if (bsList === null || bsList === undefined) {
+      console.log('[Keepa] bestSellersList is null/undefined')
       return []
     }
 
-    // Handle the { asinList: string[] } format
-    if (bsList.asinList && Array.isArray(bsList.asinList)) {
-      // Convert string ASINs to KeepaBestSeller objects
-      return bsList.asinList.map((asin: string, index: number) => ({
-        asin,
-        domainId: domainId,
-        lastUpdate: Date.now(),
-        categoryId: categoryId,
-        rank: index + 1,
-      }))
+    // Handle empty string
+    if (bsList === '') {
+      console.log('[Keepa] bestSellersList is empty string')
+      return []
     }
 
-    // If it's already an array of objects with asin property
+    // Handle the { asinList: string[] } format (most common)
+    if (typeof bsList === 'object' && !Array.isArray(bsList)) {
+      // Check for asinList property
+      if ('asinList' in bsList) {
+        const asinList = bsList.asinList
+
+        // Handle null/empty asinList
+        if (!asinList || (Array.isArray(asinList) && asinList.length === 0)) {
+          console.log('[Keepa] asinList is empty')
+          return []
+        }
+
+        if (Array.isArray(asinList)) {
+          // Filter and validate ASINs
+          return asinList
+            .filter((asin: unknown): asin is string =>
+              typeof asin === 'string' && asin.length > 0 && asin.length <= 15
+            )
+            .map((asin: string, index: number) => ({
+              asin: asin.trim(),
+              domainId,
+              lastUpdate: Date.now(),
+              categoryId,
+              rank: index + 1,
+            }))
+        }
+
+        // asinList is not an array - try to convert
+        if (typeof asinList === 'string') {
+          // Single ASIN as string
+          return [{
+            asin: asinList.trim(),
+            domainId,
+            lastUpdate: Date.now(),
+            categoryId,
+            rank: 1,
+          }]
+        }
+
+        console.log('[Keepa] asinList has unexpected type:', typeof asinList)
+        return []
+      }
+
+      // Check for categoryId-keyed format: { "12345": [...] }
+      const categoryIdStr = String(categoryId)
+      if (categoryIdStr in bsList) {
+        const categoryData = bsList[categoryIdStr]
+        if (Array.isArray(categoryData)) {
+          return this.normalizeSellerArray(categoryData, domainId, categoryId)
+        }
+      }
+
+      // Try to find any array in the object values
+      for (const [key, value] of Object.entries(bsList)) {
+        if (Array.isArray(value) && value.length > 0) {
+          console.log(`[Keepa] Found array in key "${key}", using it as bestSellersList`)
+          return this.normalizeSellerArray(value, domainId, categoryId)
+        }
+      }
+
+      console.log('[Keepa] Object has no recognizable bestSellersList format, keys:', Object.keys(bsList))
+      return []
+    }
+
+    // Handle direct array format
     if (Array.isArray(bsList)) {
-      return bsList
-    }
-
-    // If it's an object keyed by category ID
-    if (typeof bsList === 'object') {
-      const categoryData = bsList[categoryId]
-      if (Array.isArray(categoryData)) {
-        return categoryData
-      }
-      // Try to get any available array
-      const values = Object.values(bsList)
-      if (values.length > 0 && Array.isArray(values[0])) {
-        return values[0] as KeepaBestSeller[]
-      }
+      return this.normalizeSellerArray(bsList, domainId, categoryId)
     }
 
     console.log('[Keepa] Unexpected bestSellersList format:', typeof bsList)
     return []
+  }
+
+  /**
+   * Normalize an array of sellers/ASINs to KeepaBestSeller format
+   */
+  private normalizeSellerArray(
+    arr: unknown[],
+    domainId: number,
+    categoryId: number
+  ): KeepaBestSeller[] {
+    if (arr.length === 0) return []
+
+    const result: KeepaBestSeller[] = []
+
+    for (let i = 0; i < arr.length; i++) {
+      const item = arr[i]
+
+      // Skip null/undefined
+      if (item === null || item === undefined) continue
+
+      // String ASIN
+      if (typeof item === 'string' && item.length > 0) {
+        result.push({
+          asin: item.trim(),
+          domainId,
+          lastUpdate: Date.now(),
+          categoryId,
+          rank: result.length + 1,
+        })
+        continue
+      }
+
+      // Object with asin property
+      if (typeof item === 'object') {
+        const obj = item as Record<string, unknown>
+        const asin = obj.asin || obj.ASIN || obj.Asin
+
+        if (typeof asin === 'string' && asin.length > 0) {
+          result.push({
+            asin: asin.trim(),
+            domainId: typeof obj.domainId === 'number' ? obj.domainId : domainId,
+            lastUpdate: typeof obj.lastUpdate === 'number' ? obj.lastUpdate : Date.now(),
+            categoryId: typeof obj.categoryId === 'number' ? obj.categoryId : categoryId,
+            rank: typeof obj.rank === 'number' ? obj.rank : result.length + 1,
+          })
+        }
+      }
+    }
+
+    return result
   }
 
   /**

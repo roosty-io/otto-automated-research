@@ -545,3 +545,148 @@ export async function evaluate<T>(
 ): Promise<T> {
   return await page.evaluate(fn, ...args)
 }
+
+/**
+ * Safe page operation with automatic retry on common transient errors
+ * Handles: TargetCloseError, ProtocolError, Navigation timeout
+ */
+export async function safePageOperation<T>(
+  page: Page,
+  operation: () => Promise<T>,
+  options: {
+    retries?: number
+    retryDelay?: number
+    operationName?: string
+  } = {}
+): Promise<{ success: boolean; result?: T; error?: string }> {
+  const maxRetries = options.retries ?? 2
+  const retryDelay = options.retryDelay ?? 1000
+  const opName = options.operationName ?? 'operation'
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      // Check if page is still connected
+      if (page.isClosed()) {
+        return { success: false, error: 'Page is closed' }
+      }
+
+      const result = await operation()
+      return { success: true, result }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+
+      // Check for retryable errors
+      const isRetryable =
+        errorMessage.includes('Target closed') ||
+        errorMessage.includes('Protocol error') ||
+        errorMessage.includes('Execution context was destroyed') ||
+        errorMessage.includes('Navigation timeout') ||
+        errorMessage.includes('net::ERR_')
+
+      if (isRetryable && attempt < maxRetries) {
+        console.warn(`[Helpers] ${opName} failed (attempt ${attempt + 1}), retrying: ${errorMessage}`)
+        await sleep(retryDelay * (attempt + 1))
+        continue
+      }
+
+      console.error(`[Helpers] ${opName} failed permanently:`, errorMessage)
+      return { success: false, error: errorMessage }
+    }
+  }
+
+  return { success: false, error: 'Max retries exceeded' }
+}
+
+/**
+ * Wait for page to be in a stable state (no pending network requests)
+ */
+export async function waitForPageStable(
+  page: Page,
+  options: { timeout?: number; maxInflightRequests?: number } = {}
+): Promise<boolean> {
+  const timeout = options.timeout ?? 10000
+  const maxInflight = options.maxInflightRequests ?? 2
+  const startTime = Date.now()
+
+  let inflightRequests = 0
+  const requestHandler = () => { inflightRequests++ }
+  const responseHandler = () => { inflightRequests = Math.max(0, inflightRequests - 1) }
+
+  page.on('request', requestHandler)
+  page.on('requestfinished', responseHandler)
+  page.on('requestfailed', responseHandler)
+
+  try {
+    // Wait for network to stabilize
+    while (Date.now() - startTime < timeout) {
+      if (inflightRequests <= maxInflight) {
+        // Wait a bit more to confirm stability
+        await sleep(200)
+        if (inflightRequests <= maxInflight) {
+          return true
+        }
+      }
+      await sleep(100)
+    }
+    return false
+  } finally {
+    page.off('request', requestHandler)
+    page.off('requestfinished', responseHandler)
+    page.off('requestfailed', responseHandler)
+  }
+}
+
+/**
+ * Get page content with error handling
+ */
+export async function getPageContent(page: Page): Promise<{ content: string; error?: string }> {
+  try {
+    const content = await page.content()
+    return { content }
+  } catch (error) {
+    return {
+      content: '',
+      error: error instanceof Error ? error.message : 'Failed to get page content'
+    }
+  }
+}
+
+/**
+ * Check if an element contains specific text
+ */
+export async function elementContainsText(
+  page: Page,
+  selector: string,
+  searchText: string
+): Promise<boolean> {
+  try {
+    const element = await page.$(selector)
+    if (!element) return false
+
+    const text = await element.evaluate((el) => el.textContent || '')
+    return text.toLowerCase().includes(searchText.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Wait for element to contain specific text
+ */
+export async function waitForElementText(
+  page: Page,
+  selector: string,
+  expectedText: string,
+  options: WaitOptions = {}
+): Promise<boolean> {
+  const timeout = options.timeout ?? DEFAULT_TIMEOUT
+  const startTime = Date.now()
+
+  while (Date.now() - startTime < timeout) {
+    if (await elementContainsText(page, selector, expectedText)) {
+      return true
+    }
+    await sleep(200)
+  }
+  return false
+}

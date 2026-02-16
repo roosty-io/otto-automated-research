@@ -322,19 +322,65 @@ class BrowserPool {
     let browser: Browser
     let actualBrowserId: string
     let pooled: PooledBrowser | undefined
+    let retries = 0
+    const MAX_RETRIES = 2
 
-    if (browserId && this.browsers.has(browserId)) {
-      pooled = this.browsers.get(browserId)!
-      browser = pooled.browser
-      actualBrowserId = browserId
-    } else {
-      const result = await this.getBrowser()
-      browser = result.browser
-      actualBrowserId = result.browserId
-      pooled = this.browsers.get(actualBrowserId)
+    while (retries <= MAX_RETRIES) {
+      try {
+        if (browserId && this.browsers.has(browserId)) {
+          pooled = this.browsers.get(browserId)!
+          // Check if browser is still connected
+          if (!pooled.browser.connected) {
+            console.log(`[BrowserPool] Browser ${browserId} disconnected, removing from pool`)
+            this.browsers.delete(browserId)
+            browserId = undefined
+            retries++
+            continue
+          }
+          browser = pooled.browser
+          actualBrowserId = browserId
+        } else {
+          const result = await this.getBrowser()
+          browser = result.browser
+          actualBrowserId = result.browserId
+          pooled = this.browsers.get(actualBrowserId)
+        }
+
+        // Verify browser is connected before creating page
+        if (!browser.connected) {
+          console.log(`[BrowserPool] Browser ${actualBrowserId} not connected, retrying...`)
+          this.browsers.delete(actualBrowserId)
+          retries++
+          continue
+        }
+
+        break
+      } catch (error) {
+        console.error(`[BrowserPool] Error getting browser (attempt ${retries + 1}):`, error)
+        retries++
+        if (retries > MAX_RETRIES) {
+          throw new Error(`Failed to get browser after ${MAX_RETRIES} retries: ${error instanceof Error ? error.message : 'Unknown error'}`)
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000 * retries))
+      }
     }
 
-    const page = await browser.newPage()
+    let page: Page
+    try {
+      page = await browser!.newPage()
+    } catch (pageError) {
+      console.error(`[BrowserPool] Failed to create page:`, pageError)
+      // Browser might be in bad state, remove it
+      if (actualBrowserId) {
+        this.browsers.delete(actualBrowserId)
+      }
+      throw new Error(`Failed to create page: ${pageError instanceof Error ? pageError.message : 'Unknown error'}`)
+    }
+
+    // Ensure we have valid browser ID at this point
+    if (!actualBrowserId) {
+      throw new Error('Browser ID not set after browser acquisition')
+    }
 
     // Apply proxy authentication if configured
     if (pooled?.proxyAuth) {
