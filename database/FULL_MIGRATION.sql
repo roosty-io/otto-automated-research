@@ -206,6 +206,13 @@ CREATE TABLE IF NOT EXISTS raw_products (
     UNIQUE(asin)
 );
 
+-- Ensure columns exist for pre-existing raw_products table
+ALTER TABLE raw_products ADD COLUMN IF NOT EXISTS is_processed BOOLEAN DEFAULT false;
+ALTER TABLE raw_products ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
+ALTER TABLE raw_products ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'keepa';
+ALTER TABLE raw_products ADD COLUMN IF NOT EXISTS source_batch_id TEXT;
+UPDATE raw_products SET is_processed = false WHERE is_processed IS NULL;
+
 CREATE INDEX IF NOT EXISTS idx_raw_products_unprocessed ON raw_products(is_processed) WHERE is_processed = false;
 CREATE INDEX IF NOT EXISTS idx_raw_products_category ON raw_products(category);
 CREATE INDEX IF NOT EXISTS idx_raw_products_created ON raw_products(created_at);
