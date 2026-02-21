@@ -295,6 +295,12 @@ CREATE TABLE IF NOT EXISTS skus (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Ensure columns exist for pre-existing skus table
+ALTER TABLE skus ADD COLUMN IF NOT EXISTS user_id UUID;
+ALTER TABLE skus ADD COLUMN IF NOT EXISTS validation_status TEXT DEFAULT 'pending';
+ALTER TABLE skus ADD COLUMN IF NOT EXISTS amazon_url TEXT;
+ALTER TABLE skus ADD COLUMN IF NOT EXISTS amazon_asin TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_skus_status ON skus(status);
 CREATE INDEX IF NOT EXISTS idx_skus_pattern ON skus(pattern_id);
 CREATE INDEX IF NOT EXISTS idx_skus_available ON skus(status, current_store_count) WHERE status = 'ready' AND current_store_count < 3;
@@ -509,6 +515,9 @@ CREATE TABLE IF NOT EXISTS orders (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Ensure columns exist for pre-existing orders table
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id UUID;
+
 CREATE INDEX IF NOT EXISTS idx_orders_store ON orders(store_id, order_date DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, order_date DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_sku ON orders(sku_id, order_date DESC);
@@ -658,6 +667,9 @@ CREATE TABLE IF NOT EXISTS listing_jobs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Ensure columns exist for pre-existing listing_jobs table
+ALTER TABLE listing_jobs ADD COLUMN IF NOT EXISTS user_id UUID;
+
 CREATE INDEX IF NOT EXISTS idx_listing_jobs_store ON listing_jobs(store_id);
 CREATE INDEX IF NOT EXISTS idx_listing_jobs_status ON listing_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_listing_jobs_pending ON listing_jobs(priority DESC, scheduled_for) WHERE status = 'pending';
@@ -699,6 +711,9 @@ CREATE TABLE IF NOT EXISTS notifications (
     delivered_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Ensure columns exist for pre-existing notifications table
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS user_id UUID;
 
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_store ON notifications(store_id);
@@ -1133,6 +1148,10 @@ CREATE TABLE IF NOT EXISTS store_groups (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Ensure columns exist for pre-existing store_groups table
+ALTER TABLE store_groups ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);
+ALTER TABLE store_groups ADD COLUMN IF NOT EXISTS autods_account_id VARCHAR(255);
+
 CREATE INDEX IF NOT EXISTS idx_store_groups_user ON store_groups(user_id);
 CREATE INDEX IF NOT EXISTS idx_store_groups_autods ON store_groups(autods_account_id);
 
@@ -1159,6 +1178,9 @@ CREATE TABLE IF NOT EXISTS fleet_alerts (
     acknowledged_by VARCHAR(255),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Ensure columns exist for pre-existing fleet_alerts table
+ALTER TABLE fleet_alerts ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);
 
 CREATE INDEX IF NOT EXISTS idx_fleet_alerts_user ON fleet_alerts(user_id, acknowledged, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_fleet_alerts_severity ON fleet_alerts(severity, created_at DESC) WHERE NOT acknowledged;
@@ -1221,6 +1243,9 @@ CREATE TABLE IF NOT EXISTS fleet_metrics_snapshots (
     UNIQUE(group_id, snapshot_date)
 );
 
+-- Ensure columns exist for pre-existing fleet_metrics_snapshots table
+ALTER TABLE fleet_metrics_snapshots ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);
+
 CREATE INDEX IF NOT EXISTS idx_fleet_snapshots_group_date ON fleet_metrics_snapshots(group_id, snapshot_date DESC);
 CREATE INDEX IF NOT EXISTS idx_fleet_snapshots_user_date ON fleet_metrics_snapshots(user_id, snapshot_date DESC);
 
@@ -1238,6 +1263,9 @@ CREATE TABLE IF NOT EXISTS bulk_operation_logs (
     error_messages TEXT[],
     executed_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Ensure columns exist for pre-existing bulk_operation_logs table
+ALTER TABLE bulk_operation_logs ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);
 
 CREATE INDEX IF NOT EXISTS idx_bulk_ops_user ON bulk_operation_logs(user_id, executed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bulk_ops_type ON bulk_operation_logs(operation_type, executed_at DESC);
@@ -1434,6 +1462,9 @@ CREATE TABLE IF NOT EXISTS store_daily_metrics (
     UNIQUE(store_id, date)
 );
 
+-- Ensure columns exist for pre-existing store_daily_metrics table
+ALTER TABLE store_daily_metrics ADD COLUMN IF NOT EXISTS user_id UUID;
+
 CREATE INDEX IF NOT EXISTS idx_store_metrics_store ON store_daily_metrics(store_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_store_metrics_user ON store_daily_metrics(user_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_store_metrics_date ON store_daily_metrics(date DESC);
@@ -1466,6 +1497,9 @@ CREATE TABLE IF NOT EXISTS user_profit_summary (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(user_id, period_start, period_end)
 );
+
+-- Ensure columns exist for pre-existing user_profit_summary table
+ALTER TABLE user_profit_summary ADD COLUMN IF NOT EXISTS user_id UUID;
 
 CREATE INDEX IF NOT EXISTS idx_profit_summary_user ON user_profit_summary(user_id, period_start DESC);
 
