@@ -118,8 +118,12 @@ CREATE TABLE IF NOT EXISTS stores (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Ensure client_id column exists for pre-existing tables (before creating index)
+-- Ensure columns exist for pre-existing tables (before creating indexes)
 ALTER TABLE stores ADD COLUMN IF NOT EXISTS client_id UUID;
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS maturity store_maturity NOT NULL DEFAULT 'new';
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS maturity_updated_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS calculated_soft_ceiling INTEGER;
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS ceiling_last_calculated TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_stores_tier ON stores(tier_id);
 CREATE INDEX IF NOT EXISTS idx_stores_active ON stores(is_active) WHERE is_active = true;
