@@ -118,6 +118,9 @@ CREATE TABLE IF NOT EXISTS stores (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Ensure client_id column exists for pre-existing tables (before creating index)
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS client_id UUID;
+
 CREATE INDEX IF NOT EXISTS idx_stores_tier ON stores(tier_id);
 CREATE INDEX IF NOT EXISTS idx_stores_active ON stores(is_active) WHERE is_active = true;
 CREATE INDEX IF NOT EXISTS idx_stores_client ON stores(client_id) WHERE client_id IS NOT NULL;
